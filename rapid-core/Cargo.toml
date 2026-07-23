@@ -1,0 +1,20 @@
+[package]
+name = "rapid-core"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+talky.workspace = true
+heapless.workspace = true
+embassy-executor.workspace = true
+embassy-time.workspace = true
+embassy-futures.workspace = true
+embassy-sync.workspace = true
+static_cell.workspace = true
+serde.workspace = true
+trouble-host.workspace = true
+rapid-types = {path="../rapid-types"}
+rapid-macros = {path="../rapid-macros"}
+
+[dev-dependencies]
+tokio.workspace = true
