@@ -4,6 +4,9 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+rapid-types = {path="../rapid-types"}
+rapid-macros = {path="../rapid-macros"}
+
 talky.workspace = true
 heapless.workspace = true
 embassy-executor.workspace = true
@@ -13,8 +16,12 @@ embassy-sync.workspace = true
 static_cell.workspace = true
 serde.workspace = true
 trouble-host.workspace = true
-rapid-types = {path="../rapid-types"}
-rapid-macros = {path="../rapid-macros"}
-
+bt-hci.workspace = true
+const_panic.workspace = true
+sequential-storage.workspace = true
+embedded-storage.workspace = true
+embedded-storage-async.workspace = true
+embassy-embedded-hal.workspace = true
+postcard.workspace = true
 [dev-dependencies]
 tokio.workspace = true

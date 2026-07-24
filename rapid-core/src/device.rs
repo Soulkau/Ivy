@@ -1,11 +1,12 @@
 use core::ops::Deref;
 
+use embedded_storage::nor_flash::NorFlash;
 use heapless::String;
 use serde::{Deserialize, Serialize};
 use static_cell::StaticCell;
 use talky::{device::DeviceType, id::DeviceID};
 
-use crate::storage::{SequantialStorageModule, StorageKey};
+use crate::storage::{StorageKey, StorageModule};
 
 #[derive(Serialize, Deserialize)]
 pub struct PersistentDeviceMeta {
@@ -27,10 +28,15 @@ impl Deref for DeviceMetadata {
 }
 
 impl DeviceMetadata {
-    pub fn new(storage: SequantialStorageModule, device_type: DeviceType) -> &'static Self {
+    pub async fn load<F: NorFlash>(
+        storage: &StorageModule<F>,
+        device_type: DeviceType,
+    ) -> &'static Self {
         static META: StaticCell<DeviceMetadata> = StaticCell::new();
-        let persistent: PersistentDeviceMeta =
-            storage.get(StorageKey::metadata_key()).expect("Device");
+        let persistent: PersistentDeviceMeta = storage
+            .get(StorageKey::metadata_key())
+            .await
+            .expect("Device");
         let data = META.init_with(move || DeviceMetadata {
             persistent,
             device_type,

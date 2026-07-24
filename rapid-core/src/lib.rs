@@ -2,37 +2,40 @@
 
 use core::{marker::PhantomData, ops::Deref};
 
+use embedded_storage::nor_flash::NorFlash;
 use rapid_types::Runnable;
-use talky::device::{DeviceActionHandler, DeviceProtocol};
+use talky::{
+    device::{DeviceActionHandler, DeviceProtocol},
+    id::DeviceID,
+};
 
 use crate::{
-    bluetooth::BluetoothHandle, mqtt::MqttModule, storage::SequantialStorageModule,
+    bluetooth::BluetoothHandle, device::DeviceMetadata, mqtt::MqttModule, storage::StorageModule,
     wifi::WifiModule,
 };
 pub mod bluetooth;
+pub mod device;
+mod mqtt;
 pub mod storage;
 pub mod wifi;
 
-mod mqtt;
-
-struct RapidFramework<A, P>
+pub struct RapidFramework<A, F>
 where
-    P: DeviceProtocol,
-    A: DeviceActionHandler<P> + Runnable,
+    F: NorFlash + 'static,
+    A: DeviceActionHandler + Runnable,
 {
     bluetooth: BluetoothHandle,
-    storage: SequantialStorageModule,
     wifi: WifiModule,
     mqtt: MqttModule,
-    //Make this runnable
+    storage: StorageModule<F>,
+    metadata: &'static DeviceMetadata,
     device_app: A,
-    protocol: PhantomData<P>,
 }
 
-impl<A, P> Deref for RapidFramework<A, P>
+impl<A, F> Deref for RapidFramework<A, F>
 where
-    P: DeviceProtocol,
-    A: DeviceActionHandler<P> + Runnable,
+    F: NorFlash,
+    A: DeviceActionHandler + Runnable,
 {
     type Target = A;
 
@@ -42,16 +45,17 @@ where
     }
 }
 
-impl<A, P> RapidFramework<A, P>
+impl<A, F> RapidFramework<A, F>
 where
-    P: DeviceProtocol,
-    A: DeviceActionHandler<P> + Runnable,
+    A: DeviceActionHandler + Runnable,
+    F: NorFlash,
 {
     fn new(
         bluetooth: BluetoothHandle,
-        storage: SequantialStorageModule,
+        storage: StorageModule<F>,
         wifi: WifiModule,
         mqtt: MqttModule,
+        metadata: &'static DeviceMetadata,
         device_app: A,
     ) -> Self {
         Self {
@@ -59,8 +63,8 @@ where
             storage,
             wifi,
             mqtt,
+            metadata,
             device_app,
-            protocol: PhantomData,
         }
     }
 
