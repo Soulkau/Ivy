@@ -39,11 +39,11 @@ impl<F: NorFlash> StorageModule<F> {
     }
 
     pub async fn get<D: for<'de> Deserialize<'de>>(&self, key: StorageKey) -> Option<D> {
-        let mut buffer = [0u8; 128];
         let mut guard = self.inner.lock().await;
-        let item_data = guard
+        let inner = &mut *guard; // reborrow to satisfy borrow checker
+        let item_data = inner
             .storage
-            .fetch_item(&mut buffer, key.as_ref())
+            .fetch_item(&mut inner.read_buf, key.as_ref())
             .await
             .ok()??;
 
