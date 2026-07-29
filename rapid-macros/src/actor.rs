@@ -112,6 +112,7 @@ pub fn expand_handle(attrs: TokenStream, item: TokenStream) -> TokenStream {
     });
 
     let trait_expanded = quote! {
+        #[allow(async_fn_in_trait)]
         #trait_item
 
 
