@@ -16,6 +16,7 @@ use crate::{
     wifi::WifiModule,
 };
 pub mod bluetooth;
+pub mod connection;
 pub mod device;
 mod mqtt;
 pub mod storage;

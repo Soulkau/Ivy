@@ -34,6 +34,8 @@ use talky::types::error::ErrorWithKind;
 
 const CONNECTION_TTL: u64 = 30000;
 
+const LATCH_COUNT: usize = 1;
+
 type Buffer<const Size: usize> = Memphis<Size, BufferNotifier>;
 
 pub struct BufferNotifier {
@@ -83,29 +85,88 @@ impl AsyncNotifier for BufferNotifier {
     }
 }
 
+pub struct ConnectionSlot<P>
+where
+    P: DeviceProtocol,
+    [u8; P::OUTGOING_PAYLOAD_SIZE]: Sized + 'static,
+    [u8; P::INCOMING_PAYLOAD_SIZE]: Sized + 'static,
+{
+    tx: Buffer<{ P::OUTGOING_PAYLOAD_SIZE }>,
+    rx: Buffer<{ P::INCOMING_PAYLOAD_SIZE }>,
+    watch: Watch<CriticalSectionRawMutex, (), LATCH_COUNT>,
+}
+
+impl<P> ConnectionSlot<P>
+where
+    P: DeviceProtocol,
+    [u8; P::OUTGOING_PAYLOAD_SIZE]: Sized + 'static,
+    [u8; P::INCOMING_PAYLOAD_SIZE]: Sized + 'static,
+{
+    pub const fn new() -> Self {
+        Self {
+            tx: Buffer::new(),
+            rx: Buffer::new(),
+            watch: Watch::new(),
+        }
+    }
+
+    pub fn reset(&self) {
+        let _ = self.watch.sender().send(());
+    }
+
+    pub fn try_aquire(
+        &'static self,
+    ) -> Option<(
+        Latch,
+        &'static Buffer<{ P::OUTGOING_PAYLOAD_SIZE }>,
+        &'static Buffer<{ P::INCOMING_PAYLOAD_SIZE }>,
+    )> {
+        let receiver = self.watch.receiver()?;
+        Some((Latch::new(receiver), &self.tx, &self.rx))
+    }
+}
+pub struct Latch {
+    receiver: watch::Receiver<'static, CriticalSectionRawMutex, (), LATCH_COUNT>,
+}
+
+impl Latch {
+    pub fn new(
+        receiver: watch::Receiver<'static, CriticalSectionRawMutex, (), LATCH_COUNT>,
+    ) -> Self {
+        Self { receiver }
+    }
+
+    pub async fn wait_until_closed(mut self) {
+        self.receiver.changed().await;
+    }
+}
+
 pub struct Init {}
 
 pub struct Authorised {}
 
-pub struct Connection<S, P, AH, const TX_BUFF_SIZE: usize, const RX_BUFF_SIZE: usize>
+pub struct Connection<S, P, AH>
 where
     P: DeviceProtocol,
     AH: DeviceActionHandler<Protocol = P>,
+    [u8; P::OUTGOING_PAYLOAD_SIZE]: Sized + 'static,
+    [u8; P::INCOMING_PAYLOAD_SIZE]: Sized + 'static,
 {
     state: S,
     action_handler: PhantomData<AH>,
     protocol: PhantomData<P>,
     frame_assembler: FrameAssembler<'static>,
     /// Buffer should not be touched in sequence of polling, new message is allowed to be pulled only after the current returned reassembled message is dropped.
-    tx: StreamProducer<&'static Buffer<TX_BUFF_SIZE>>,
-    rx: StreamConsumer<&'static Buffer<RX_BUFF_SIZE>>, // <- add braces here
+    tx: StreamProducer<&'static Buffer<{ P::OUTGOING_PAYLOAD_SIZE }>>,
+    rx: StreamConsumer<&'static Buffer<{ P::INCOMING_PAYLOAD_SIZE }>>,
 }
 
-impl<S, P, AH, const TX_BUFF_SIZE: usize, const RX_BUFF_SIZE: usize>
-    Connection<S, P, AH, TX_BUFF_SIZE, RX_BUFF_SIZE>
+impl<S, P, AH> Connection<S, P, AH>
 where
     P: DeviceProtocol,
     AH: DeviceActionHandler<Protocol = P>,
+    [u8; P::OUTGOING_PAYLOAD_SIZE]: Sized + 'static,
+    [u8; P::INCOMING_PAYLOAD_SIZE]: Sized + 'static,
 {
     /// Polls the next frame from rx buffer
     ///
@@ -190,7 +251,7 @@ where
     }
 
     pub async fn handle_request(&self, headers: &Headers, message: &[u8], handler: &AH) {
-        let mut grant = self.tx.wait_grant_exact(TX_BUFF_SIZE).await;
+        let mut grant = self.tx.wait_grant_exact(P::OUTGOING_PAYLOAD_SIZE).await;
 
         let result: Result<usize, DeviceError> = async {
             match headers.id {
@@ -253,7 +314,7 @@ where
         serde_json_core::to_slice(value, buf).map_err(DeviceError::from_serde_core_ser)
     }
 
-    fn with_state<NS>(self, state: NS) -> Connection<NS, P, AH, TX_BUFF_SIZE, RX_BUFF_SIZE> {
+    fn with_state<NS>(self, state: NS) -> Connection<NS, P, AH> {
         Connection {
             state,
             action_handler: self.action_handler,
@@ -265,13 +326,14 @@ where
     }
 }
 
-impl<P, AH, const TX_BUFF_SIZE: usize, const RX_BUFF_SIZE: usize>
-    Connection<Init, P, AH, TX_BUFF_SIZE, RX_BUFF_SIZE>
+impl<P, AH> Connection<Init, P, AH>
 where
     P: DeviceProtocol,
     AH: DeviceActionHandler<Protocol = P>,
+    [u8; P::OUTGOING_PAYLOAD_SIZE]: Sized + 'static,
+    [u8; P::INCOMING_PAYLOAD_SIZE]: Sized + 'static,
 {
-    pub async fn authorise(self) -> Connection<Authorised, P, AH, TX_BUFF_SIZE, RX_BUFF_SIZE> {
+    pub async fn authorise(self) -> Connection<Authorised, P, AH> {
         // let result = 'scoped: {
         //            let mut inner = self.inner.lock().await;
         //            let Some(request) = self.poll_with_timeout().await else {
@@ -298,16 +360,40 @@ pub trait ConnectionModuleHandle {
 }
 
 #[actor(ConnectionHandle)]
-pub struct ConnectionModule<T: DeviceProtocol, ActionHandler: DeviceActionHandler<Protocol = T>> {
+pub struct ConnectionModule<Protocol, ActionHandler>
+where
+    Protocol: DeviceProtocol,
+    ActionHandler: DeviceActionHandler<Protocol = Protocol>,
+    [u8; Protocol::OUTGOING_PAYLOAD_SIZE]: Sized + 'static,
+    [u8; Protocol::INCOMING_PAYLOAD_SIZE]: Sized + 'static,
+{
+    slots: &'static [ConnectionSlot<Protocol>; 2],
     handler: ActionHandler,
 }
 
-impl<T: DeviceProtocol, ActionHandler: DeviceActionHandler<Protocol = T>> Runnable
-    for ConnectionModule<T, ActionHandler>
+impl<Protocol, ActionHandler> Runnable for ConnectionModule<Protocol, ActionHandler>
+where
+    Protocol: DeviceProtocol,
+    ActionHandler: DeviceActionHandler<Protocol = Protocol>,
+    [u8; Protocol::OUTGOING_PAYLOAD_SIZE]: Sized + 'static,
+    [u8; Protocol::INCOMING_PAYLOAD_SIZE]: Sized + 'static,
 {
     async fn run(self) -> ! {
-        loop {
-            
-        }
+        let slot1 = &self.slots[0];
+        let slot2 = &self.slots[1];
+        
+        loop {}
+    }
+}
+
+impl<Protocol, ActionHandler> ConnectionModule<Protocol, ActionHandler>
+where
+    Protocol: DeviceProtocol,
+    ActionHandler: DeviceActionHandler<Protocol = Protocol>,
+    [u8; Protocol::OUTGOING_PAYLOAD_SIZE]: Sized + 'static,
+    [u8; Protocol::INCOMING_PAYLOAD_SIZE]: Sized + 'static,
+{
+    pub fn new(handler: ActionHandler, slots: &'static [ConnectionSlot<Protocol>; 2]) -> Self {
+        Self { slots, handler }
     }
 }
