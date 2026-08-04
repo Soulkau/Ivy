@@ -2,7 +2,7 @@ use heck::{ToPascalCase, ToSnakeCase};
 use proc_macro::TokenStream;
 use quote::{format_ident, quote};
 use syn::{
-    Expr, FnArg, Ident, ItemStruct, ItemTrait, Pat, Result as SResult, ReturnType, Token,
+    Expr, Fields, FnArg, Ident, ItemStruct, ItemTrait, Pat, Result as SResult, ReturnType, Token,
     TraitItem, Type,
     parse::{Parse, ParseStream},
     parse_macro_input,
@@ -33,163 +33,270 @@ pub fn expand_handle(attrs: TokenStream, item: TokenStream) -> TokenStream {
     let args = parse_macro_input!(attrs as ActorMacroArgs);
 
     let handle_name = args.handle_ident;
-    let channel_fn_name = channel_fn_name();
-    let lock_fn_name = format_ident!("__actor_call_lock");
+    let signals_name = format_ident!("{}Signals", handle_name);
+
+    let generics = &trait_item.generics;
+    let (impl_generics, ty_generics, where_clause) = generics.split_for_impl();
 
     struct MethodInfo {
-        name: syn::Ident,
-        variant_name: syn::Ident,
-        args: Vec<(syn::Ident, Type)>,
+        name: Ident,
+        variant: Ident,
+        signal_field: Ident,
+        args: Vec<(Ident, Type)>,
         ret: Type,
     }
 
-    let mut methods = Vec::new();
-
-    for trait_item in &trait_item.items {
-        if let TraitItem::Fn(method) = trait_item {
+    let methods: Vec<MethodInfo> = trait_item
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            TraitItem::Fn(method) => Some(method),
+            _ => None,
+        })
+        .map(|method| {
             let sig = &method.sig;
-            let name = sig.ident.clone();
-            let variant_name = format_ident!("{}", &name.to_string().to_pascal_case());
-
             let ret = match &sig.output {
+                ReturnType::Default => syn::parse_quote!(()),
                 ReturnType::Type(_, ty) => (**ty).clone(),
-                ReturnType::Default => syn::parse_quote! { () },
             };
 
-            let mut args = Vec::new();
-            for input_arg in &sig.inputs {
-                if let FnArg::Typed(pat_type) = input_arg {
-                    if let Pat::Ident(pat_ident) = &*pat_type.pat {
-                        args.push((pat_ident.ident.clone(), (*pat_type.ty).clone()));
+            let args = sig
+                .inputs
+                .iter()
+                .filter_map(|arg| match arg {
+                    FnArg::Typed(pat) => match &*pat.pat {
+                        Pat::Ident(id) => Some((id.ident.clone(), (*pat.ty).clone())),
+                        _ => None,
+                    },
+                    _ => None,
+                })
+                .collect();
+
+            MethodInfo {
+                name: sig.ident.clone(),
+                variant: format_ident!("{}", sig.ident.to_string().to_pascal_case()),
+                signal_field: format_ident!("reply_{}", sig.ident),
+                args,
+                ret,
+            }
+        })
+        .collect();
+
+    // 1. Generate Command Enum
+    let command_enum = {
+        let variants = methods.iter().map(|m| {
+            let variant = &m.variant;
+            let tys = m.args.iter().map(|(_, ty)| ty);
+            let ret = &m.ret;
+
+            quote! {
+                #variant(
+                    #(#tys,)*
+                    ::rapid_types::ResponseConsumer<#ret>,
+                )
+            }
+        });
+
+        quote! {
+            pub enum #command_name #generics #where_clause {
+                #(#variants),*
+            }
+        }
+    };
+
+    // 2. Generate Signals Struct (holds actual Signal values)
+    let signals_struct = {
+        let fields = methods.iter().map(|m| {
+            let field_name = &m.signal_field;
+            let ret = &m.ret;
+            quote! {
+                pub #field_name: ::embassy_sync::signal::Signal<
+                    ::embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex,
+                    #ret
+                >
+            }
+        });
+
+        let inits = methods.iter().map(|m| {
+            let field_name = &m.signal_field;
+            quote! { #field_name: ::embassy_sync::signal::Signal::new() }
+        });
+
+        quote! {
+            pub struct #signals_name #generics #where_clause {
+                #(#fields,)*
+            }
+
+            impl #impl_generics #signals_name #ty_generics #where_clause {
+                pub const fn new() -> Self {
+                    Self {
+                        #(#inits,)*
                     }
                 }
             }
-
-            methods.push(MethodInfo {
-                name,
-                variant_name,
-                args,
-                ret,
-            });
         }
-    }
+    };
 
-    // each variant carries a &'static Signal<...> instead of a Sender for the reply
-    let enum_variants = methods.iter().map(|m| {
-        let variant = &m.variant_name;
-        let arg_types = m.args.iter().map(|(_, ty)| ty);
-        let ret = &m.ret;
-        quote! {
-            #variant(
-                #(#arg_types,)*
-                ::rapid_types::ResponseConsumer<#ret>,
-            )
-        }
-    });
-
+    // 3. Generate Handle methods
     let handle_methods = methods.iter().map(|m| {
         let name = &m.name;
-        let variant = &m.variant_name;
+        let variant = &m.variant;
         let ret = &m.ret;
+        let signal_field = &m.signal_field;
         let arg_names: Vec<_> = m.args.iter().map(|(n, _)| n).collect();
         let arg_types: Vec<_> = m.args.iter().map(|(_, t)| t).collect();
-        let reply_static = format_ident!("REPLY_{}", m.name.to_string().to_uppercase());
 
         quote! {
             pub async fn #name(&self #(, #arg_names: #arg_types)*) -> #ret {
-                static #reply_static: ::embassy_sync::signal::Signal<
-                    ::embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex, #ret
-                > = ::embassy_sync::signal::Signal::new();
-
-                // serialize concurrent callers so they don't share the static reply slot
                 let _guard = self.call_lock.lock().await;
-                #reply_static.reset();
+                self.signals.#signal_field.reset();
 
-                self.cmd_tx.send(#command_name::#variant(#(#arg_names,)* ::rapid_types::ResponseConsumer::<#ret>(&#reply_static))).await;
-                #reply_static.wait().await
+                self.cmd_tx
+                    .send(#command_name::#variant(
+                        #(#arg_names,)*
+                        ::rapid_types::ResponseConsumer::<#ret>(&self.signals.#signal_field)
+                    ))
+                    .await;
+
+                self.signals.#signal_field.wait().await
             }
         }
     });
 
-    let trait_expanded = quote! {
-        #[allow(async_fn_in_trait)]
-        #trait_item
-
-
-        pub enum #command_name {
-            #(#enum_variants),*
-        }
-
+    // 4. Generate Handle struct & ActorHandle impl
+    let handle = quote! {
         #[derive(Clone)]
-        pub struct #handle_name {
-            cmd_tx: ::embassy_sync::channel::Sender<'static, ::embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex, #command_name, 4>,
-            call_lock: &'static ::embassy_sync::mutex::Mutex<::embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex, ()>,
+        pub struct #handle_name #generics #where_clause {
+            cmd_tx: ::embassy_sync::channel::Sender<
+                'static,
+                ::embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex,
+                #command_name #ty_generics,
+                4,
+            >,
+            call_lock: &'static ::embassy_sync::mutex::Mutex<
+                ::embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex,
+                (),
+            >,
+            signals: &'static #signals_name #ty_generics,
         }
 
-        impl #handle_name {
-            pub fn from_static_parts() -> Self {
+        impl #impl_generics #handle_name #ty_generics #where_clause {
+            pub(crate) fn new(
+                cmd_tx: ::embassy_sync::channel::Sender<
+                    'static,
+                    ::embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex,
+                    #command_name #ty_generics,
+                    4,
+                >,
+                call_lock: &'static ::embassy_sync::mutex::Mutex<
+                    ::embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex,
+                    (),
+                >,
+                signals: &'static #signals_name #ty_generics,
+            ) -> Self {
                 Self {
-                    cmd_tx: Self::#channel_fn_name().sender(),
-                    call_lock: Self::#lock_fn_name(),
+                    cmd_tx,
+                    call_lock,
+                    signals,
                 }
             }
 
             #(#handle_methods)*
-
-            fn #channel_fn_name() -> &'static ::embassy_sync::channel::Channel<::embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex, #command_name, 4> {
-                static CHANNEL: ::embassy_sync::channel::Channel<
-                ::embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex, #command_name, 4
-                    > = ::embassy_sync::channel::Channel::new();
-                &CHANNEL
-            }
-
-            fn #lock_fn_name() -> &'static ::embassy_sync::mutex::Mutex<::embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex, ()> {
-                static LOCK: ::embassy_sync::mutex::Mutex<
-                ::embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex, ()
-                > = ::embassy_sync::mutex::Mutex::new(());
-                &LOCK
-            }
         }
 
-        impl ::rapid_types::ActorHandle for #handle_name {
-            type Command = #command_name;
+        impl #impl_generics ::rapid_types::ActorHandle
+            for #handle_name #ty_generics
+            #where_clause
+        {
+            type Command = #command_name #ty_generics;
+            type Signals = #signals_name #ty_generics;
         }
-
     };
 
-    trait_expanded.into()
+    quote! {
+        #command_enum
+        #signals_struct
+        #handle
+    }
+    .into()
 }
 
 pub fn expand_actor(attrs: TokenStream, input: TokenStream) -> TokenStream {
-    // 1. Parse the input as an ItemStruct instead of a Type
-    let struct_item = parse_macro_input!(input as ItemStruct);
+    let mut struct_item = parse_macro_input!(input as ItemStruct);
     let handle_item = parse_macro_input!(attrs as Type);
-    let channel_fn_name = channel_fn_name();
 
-    // 2. Extract the struct's name and split its generics for the impl blocks
+    let (struct_field_names, struct_field_types) = match struct_item.fields {
+        Fields::Named(ref fields) => {
+            let names: Vec<_> = fields
+                .named
+                .iter()
+                .map(|f| f.ident.clone().unwrap())
+                .collect();
+            let types: Vec<_> = fields.named.iter().map(|f| f.ty.clone()).collect();
+            (names, types)
+        }
+        _ => panic!("#[actor] can only be used on structs with named fields"),
+    };
+
+    if let Fields::Named(ref mut fields) = struct_item.fields {
+        // Inject channel
+        fields.named.push(syn::parse_quote! {
+            pub(crate) cmd_channel: ::embassy_sync::channel::Channel<
+                ::embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex,
+                <#handle_item as ::rapid_types::ActorHandle>::Command,
+                4,
+            >
+        });
+
+        // Inject mutex lock
+        fields.named.push(syn::parse_quote! {
+            pub(crate) call_lock: ::embassy_sync::mutex::Mutex<
+                ::embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex,
+                (),
+            >
+        });
+
+        // Inject signals struct
+        fields.named.push(syn::parse_quote! {
+            pub(crate) signals: <#handle_item as ::rapid_types::ActorHandle>::Signals
+        });
+    }
+
     let struct_ident = &struct_item.ident;
     let (impl_generics, ty_generics, where_clause) = struct_item.generics.split_for_impl();
 
     quote! {
-        // 3. Re-emit the original struct so it doesn't get erased from your code
         #struct_item
 
-        // 4. Use the identifier and split generics for the trait impl
         impl #impl_generics ::rapid_types::Actor for #struct_ident #ty_generics #where_clause {
             type Handle = #handle_item;
         }
 
-        // 5. Use the same generics setup for the inherent impl
         impl #impl_generics #struct_ident #ty_generics #where_clause {
-            pub async fn next_command() -> <#handle_item as ::rapid_types::ActorHandle>::Command {
-                let receiver = #handle_item::#channel_fn_name().receiver();
-                receiver.receive().await
+            pub fn new(#(#struct_field_names: #struct_field_types),*) -> Self {
+                Self {
+                    #(#struct_field_names,)*
+                    cmd_channel: ::embassy_sync::channel::Channel::new(),
+                    call_lock: ::embassy_sync::mutex::Mutex::new(()),
+                    signals: <<#handle_item as ::rapid_types::ActorHandle>::Signals>::new(),
+                }
+            }
+
+            pub fn handle(&'static self) -> #handle_item {
+                <#handle_item>::new(
+                    self.cmd_channel.sender(),
+                    &self.call_lock,
+                    &self.signals,
+                )
+            }
+
+            pub async fn next_command(&self) -> <#handle_item as ::rapid_types::ActorHandle>::Command {
+                self.cmd_channel.receive().await
             }
         }
     }
     .into()
 }
-
 struct SpawnInput {
     spawner: Expr,
     actor_type: Type,
