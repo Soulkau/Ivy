@@ -23,5 +23,11 @@ embedded-storage.workspace = true
 embedded-storage-async.workspace = true
 embassy-embedded-hal.workspace = true
 postcard.workspace = true
+bbqueue.workspace = true
+defmt.workspace = true
+serde-json-core.workspace = true
+serde_json.workspace = true
+pin-project.workspace = true
+
 [dev-dependencies]
 tokio.workspace = true
