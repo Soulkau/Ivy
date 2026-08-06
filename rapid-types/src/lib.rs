@@ -16,6 +16,7 @@ pub trait Actor: Runnable {
 
 pub trait ActorHandle {
     type Command;
+    type Signals;
 }
 
 pub struct ResponseConsumer<T: 'static>(pub &'static Signal<CriticalSectionRawMutex, T>);
