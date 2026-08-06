@@ -85,15 +85,115 @@ impl AsyncNotifier for BufferNotifier {
     }
 }
 
+pub struct Latch {
+    _grant: SlotGrant,
+    receiver: watch::Receiver<'static, CriticalSectionRawMutex, (), LATCH_COUNT>,
+}
+
+impl Latch {
+    pub fn new(
+        receiver: watch::Receiver<'static, CriticalSectionRawMutex, (), LATCH_COUNT>,
+        grant: SlotGrant,
+    ) -> Self {
+        Self {
+            _grant: grant,
+            receiver,
+        }
+    }
+
+    pub async fn wait_until_closed(mut self) {
+        self.receiver.changed().await;
+    }
+}
+
+pub struct TransportIO<P: DeviceProtocol>
+where
+    [u8; P::OUTGOING_PAYLOAD_SIZE]: Sized + 'static,
+    [u8; P::INCOMING_PAYLOAD_SIZE]: Sized + 'static,
+{
+    pub tx: StreamProducer<&'static Buffer<{ P::INCOMING_PAYLOAD_SIZE }>>,
+    pub rx: StreamConsumer<&'static Buffer<{ P::OUTGOING_PAYLOAD_SIZE }>>,
+    pub latch: Latch,
+    _grant: SlotGrant,
+}
+pub struct ConnectionIO<P: DeviceProtocol>
+where
+    [u8; P::OUTGOING_PAYLOAD_SIZE]: Sized + 'static,
+    [u8; P::INCOMING_PAYLOAD_SIZE]: Sized + 'static,
+{
+    pub tx: StreamProducer<&'static Buffer<{ P::OUTGOING_PAYLOAD_SIZE }>>,
+    pub rx: StreamConsumer<&'static Buffer<{ P::INCOMING_PAYLOAD_SIZE }>>,
+    pub assembler: &'static mut FrameAssembler<{ P::INCOMING_PAYLOAD_SIZE }>,
+    _grant: SlotGrant,
+}
+
+/// Guard that guarantees that only one connection would be able to use it at a time
+/// by creating `SlotGrant` instances.
+pub struct SlotGuard {
+    grants: AtomicUsize,
+    acquired: AtomicBool,
+}
+
+impl SlotGuard {
+    /// Creates a new slot guard.
+    pub const fn new() -> Self {
+        Self {
+            grants: AtomicUsize::new(0),
+            acquired: AtomicBool::new(false),
+        }
+    }
+
+    /// Tries to create a slot grant from this guard.
+    /// Returns `None` if the slot is already acquired.
+    pub fn try_acquire(&'static self) -> Option<SlotGrant> {
+        self.acquired
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .ok()?;
+        Some(SlotGrant::new(&self.grants, &self.acquired))
+    }
+}
+/// Grant that is created by a [`SlotGuard`] and is used as a token for using slot fields, whenever the `grants`
+/// counter is non-zero it means that something from slot is still being used.
+pub struct SlotGrant {
+    grants: &'static AtomicUsize,
+    acquired: &'static AtomicBool,
+}
+
+impl SlotGrant {
+    fn new(grants: &'static AtomicUsize, acquired: &'static AtomicBool) -> Self {
+        grants.fetch_add(1, Ordering::AcqRel);
+        Self { grants, acquired }
+    }
+}
+
+impl Clone for SlotGrant {
+    fn clone(&self) -> Self {
+        SlotGrant::new(self.grants, self.acquired)
+    }
+}
+
+impl Drop for SlotGrant {
+    fn drop(&mut self) {
+        // If this is the last grant, release the guard
+        if self.grants.fetch_sub(1, Ordering::AcqRel) == 1 {
+            self.acquired.store(false, Ordering::Release);
+        }
+    }
+}
+/// Structure that holds resources for exactly one connection.
+///
+/// NOTE: If multiple connections would somehow gain access to a single slot, it is UB.
 pub struct ConnectionSlot<P>
 where
     P: DeviceProtocol,
     [u8; P::OUTGOING_PAYLOAD_SIZE]: Sized + 'static,
     [u8; P::INCOMING_PAYLOAD_SIZE]: Sized + 'static,
 {
-    tx: Buffer<{ P::OUTGOING_PAYLOAD_SIZE }>,
-    rx: Buffer<{ P::INCOMING_PAYLOAD_SIZE }>,
-    watch: Watch<CriticalSectionRawMutex, (), LATCH_COUNT>,
+    slot_guard: SlotGuard, //Ensure exclusive access to slot
+    frame_assembler: UnsafeCell<FrameAssembler<{ P::INCOMING_PAYLOAD_SIZE }>>, //Used to assemble incoming messages
+    tx: Buffer<{ P::OUTGOING_PAYLOAD_SIZE }>, //From connection to transport
+    rx: Buffer<{ P::INCOMING_PAYLOAD_SIZE }>, //From transport to connection
+    watch: Watch<CriticalSectionRawMutex, (), LATCH_COUNT>, //Used to notify transport that connection has died
 }
 
 impl<P> ConnectionSlot<P>
@@ -102,42 +202,52 @@ where
     [u8; P::OUTGOING_PAYLOAD_SIZE]: Sized + 'static,
     [u8; P::INCOMING_PAYLOAD_SIZE]: Sized + 'static,
 {
+    /// Creates a new connection slot.
     pub const fn new() -> Self {
         Self {
+            frame_assembler: UnsafeCell::new(FrameAssembler::new()),
             tx: Buffer::new(),
             rx: Buffer::new(),
             watch: Watch::new(),
+            slot_guard: SlotGuard::new(),
         }
     }
 
+    /// Resets the connection slot, notifying the transport that the connection has died.
     pub fn reset(&self) {
         let _ = self.watch.sender().send(());
     }
 
-    pub fn try_aquire(
-        &'static self,
-    ) -> Option<(
-        Latch,
-        &'static Buffer<{ P::OUTGOING_PAYLOAD_SIZE }>,
-        &'static Buffer<{ P::INCOMING_PAYLOAD_SIZE }>,
-    )> {
-        let receiver = self.watch.receiver()?;
-        Some((Latch::new(receiver), &self.tx, &self.rx))
-    }
-}
-pub struct Latch {
-    receiver: watch::Receiver<'static, CriticalSectionRawMutex, (), LATCH_COUNT>,
-}
+    /// Tries to acquire a slot grant from this connection slot.
+    /// Returns `None` if the slot is already acquired.
+    pub fn try_aquire(&'static self) -> Option<(ConnectionIO<P>, TransportIO<P>)> {
+        let Some(grant) = self.slot_guard.try_acquire() else {
+            defmt::warn!("[ConnectionSlot] Failed to aquire slot guard");
+            return None;
+        };
 
-impl Latch {
-    pub fn new(
-        receiver: watch::Receiver<'static, CriticalSectionRawMutex, (), LATCH_COUNT>,
-    ) -> Self {
-        Self { receiver }
-    }
-
-    pub async fn wait_until_closed(mut self) {
-        self.receiver.changed().await;
+        let Some(receiver) = self.watch.receiver() else {
+            // Realistically, this should never happen, as the slot guard is already acquired.
+            defmt::error!(
+                "[ConnectionSlot] Failed to aquire receiver, although grant was successfully acquired"
+            );
+            return None;
+        };
+        Some((
+            ConnectionIO {
+                tx: self.tx.stream_producer(),
+                rx: self.rx.stream_consumer(),
+                // SAFETY: Slot guard guarantees that if its grant counter is 0, the previous instance aquirment was fully dropped
+                assembler: unsafe { self.frame_assembler.as_mut_unchecked() },
+                _grant: grant.clone(),
+            },
+            TransportIO {
+                tx: self.rx.stream_producer(),
+                rx: self.tx.stream_consumer(),
+                latch: Latch::new(receiver, grant.clone()),
+                _grant: grant,
+            },
+        ))
     }
 }
 
@@ -155,10 +265,7 @@ where
     state: S,
     action_handler: PhantomData<AH>,
     protocol: PhantomData<P>,
-    frame_assembler: FrameAssembler<'static>,
-    /// Buffer should not be touched in sequence of polling, new message is allowed to be pulled only after the current returned reassembled message is dropped.
-    tx: StreamProducer<&'static Buffer<{ P::OUTGOING_PAYLOAD_SIZE }>>,
-    rx: StreamConsumer<&'static Buffer<{ P::INCOMING_PAYLOAD_SIZE }>>,
+    io: ConnectionIO<P>,
 }
 
 impl<S, P, AH> Connection<S, P, AH>
@@ -168,14 +275,23 @@ where
     [u8; P::OUTGOING_PAYLOAD_SIZE]: Sized + 'static,
     [u8; P::INCOMING_PAYLOAD_SIZE]: Sized + 'static,
 {
+    pub fn new(state: S, io: ConnectionIO<P>) -> Self {
+        Self {
+            state,
+            action_handler: PhantomData,
+            protocol: PhantomData,
+            io,
+        }
+    }
+
     /// Polls the next frame from rx buffer
     ///
     /// # Returns
     /// `None` if message was not assembled yet and needs more frames
     /// `Some(message_len)` if message was assembled
     pub async fn poll_frame(&mut self) -> Option<usize> {
-        let grant = self.rx.wait_read().await;
-        match self.frame_assembler.assemble(&grant) {
+        let grant = self.io.rx.wait_read().await;
+        match self.io.assembler.assemble(&grant) {
             Ok(message_len) => message_len,
             Err(e) => {
                 defmt::error!(
@@ -251,7 +367,7 @@ where
     }
 
     pub async fn handle_request(&self, headers: &Headers, message: &[u8], handler: &AH) {
-        let mut grant = self.tx.wait_grant_exact(P::OUTGOING_PAYLOAD_SIZE).await;
+        let mut grant = self.io.tx.wait_grant_exact(P::OUTGOING_PAYLOAD_SIZE).await;
 
         let result: Result<usize, DeviceError> = async {
             match headers.id {
@@ -319,9 +435,7 @@ where
             state,
             action_handler: self.action_handler,
             protocol: self.protocol,
-            frame_assembler: self.frame_assembler,
-            tx: self.tx,
-            rx: self.rx,
+            io: self.io,
         }
     }
 }
