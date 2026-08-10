@@ -1,11 +1,11 @@
 [package]
-name = "rapid-core"
+name = "ivy-core"
 version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-rapid-types = {path="../rapid-types"}
-rapid-macros = {path="../rapid-macros"}
+ivy-types = {path="../ivy-types"}
+ivy-macros = {path="../ivy-macros"}
 
 talky.workspace = true
 heapless.workspace = true
@@ -28,6 +28,11 @@ defmt.workspace = true
 serde-json-core.workspace = true
 serde_json.workspace = true
 pin-project.workspace = true
-
+tracing.workspace = true
+mqttrust.workspace = true
+embassy-net.workspace = true
+embedded-tls.workspace = true
 [dev-dependencies]
 tokio.workspace = true
+tracing-subscriber.workspace = true
+critical-section.workspace = true

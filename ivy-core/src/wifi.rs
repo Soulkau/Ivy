@@ -1,6 +1,13 @@
 use heapless::{String, Vec};
-use rapid_macros::actor;
-use rapid_types::{Actor, Runnable};
+use ivy_macros::actor;
+use ivy_types::{Actor, Runnable};
+use serde::{Deserialize, Serialize};
+
+#[derive(Serialize, Deserialize)]
+pub struct WifiCredentials {
+    pub ssid: String<32>,
+    pub password: String<64>,
+}
 
 #[derive(Clone)]
 pub struct WifiModule {}

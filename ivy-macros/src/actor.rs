@@ -1,13 +1,10 @@
-use heck::{ToPascalCase, ToSnakeCase};
+use heck::ToPascalCase;
 use proc_macro::TokenStream;
 use quote::{format_ident, quote};
 use syn::{
-    Expr, Fields, FnArg, Ident, ItemStruct, ItemTrait, Pat, Result as SResult, ReturnType, Token,
-    TraitItem, Type,
+    Expr, Fields, FnArg, Ident, ItemStruct, ItemTrait, Pat, Result as SResult, ReturnType, Token, TraitItem, Type,
     parse::{Parse, ParseStream},
     parse_macro_input,
-    punctuated::Punctuated,
-    token::Struct,
 };
 
 struct ActorMacroArgs {
@@ -92,7 +89,7 @@ pub fn expand_handle(attrs: TokenStream, item: TokenStream) -> TokenStream {
             quote! {
                 #variant(
                     #(#tys,)*
-                    ::rapid_types::ResponseConsumer<#ret>,
+                    ::ivy_types::ResponseConsumer<#ret>,
                 )
             }
         });
@@ -154,7 +151,7 @@ pub fn expand_handle(attrs: TokenStream, item: TokenStream) -> TokenStream {
                 self.cmd_tx
                     .send(#command_name::#variant(
                         #(#arg_names,)*
-                        ::rapid_types::ResponseConsumer::<#ret>(&self.signals.#signal_field)
+                        ::ivy_types::ResponseConsumer::<#ret>(&self.signals.#signal_field)
                     ))
                     .await;
 
@@ -204,7 +201,7 @@ pub fn expand_handle(attrs: TokenStream, item: TokenStream) -> TokenStream {
             #(#handle_methods)*
         }
 
-        impl #impl_generics ::rapid_types::ActorHandle
+        impl #impl_generics ::ivy_types::ActorHandle
             for #handle_name #ty_generics
             #where_clause
         {
@@ -227,11 +224,7 @@ pub fn expand_actor(attrs: TokenStream, input: TokenStream) -> TokenStream {
 
     let (struct_field_names, struct_field_types) = match struct_item.fields {
         Fields::Named(ref fields) => {
-            let names: Vec<_> = fields
-                .named
-                .iter()
-                .map(|f| f.ident.clone().unwrap())
-                .collect();
+            let names: Vec<_> = fields.named.iter().map(|f| f.ident.clone().unwrap()).collect();
             let types: Vec<_> = fields.named.iter().map(|f| f.ty.clone()).collect();
             (names, types)
         }
@@ -243,7 +236,7 @@ pub fn expand_actor(attrs: TokenStream, input: TokenStream) -> TokenStream {
         fields.named.push(syn::parse_quote! {
             pub(crate) cmd_channel: ::embassy_sync::channel::Channel<
                 ::embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex,
-                <#handle_item as ::rapid_types::ActorHandle>::Command,
+                <#handle_item as ::ivy_types::ActorHandle>::Command,
                 4,
             >
         });
@@ -258,7 +251,7 @@ pub fn expand_actor(attrs: TokenStream, input: TokenStream) -> TokenStream {
 
         // Inject signals struct
         fields.named.push(syn::parse_quote! {
-            pub(crate) signals: <#handle_item as ::rapid_types::ActorHandle>::Signals
+            pub(crate) signals: <#handle_item as ::ivy_types::ActorHandle>::Signals
         });
     }
 
@@ -268,7 +261,7 @@ pub fn expand_actor(attrs: TokenStream, input: TokenStream) -> TokenStream {
     quote! {
         #struct_item
 
-        impl #impl_generics ::rapid_types::Actor for #struct_ident #ty_generics #where_clause {
+        impl #impl_generics ::ivy_types::Actor for #struct_ident #ty_generics #where_clause {
             type Handle = #handle_item;
         }
 
@@ -278,7 +271,7 @@ pub fn expand_actor(attrs: TokenStream, input: TokenStream) -> TokenStream {
                     #(#struct_field_names,)*
                     cmd_channel: ::embassy_sync::channel::Channel::new(),
                     call_lock: ::embassy_sync::mutex::Mutex::new(()),
-                    signals: <<#handle_item as ::rapid_types::ActorHandle>::Signals>::new(),
+                    signals: <<#handle_item as ::ivy_types::ActorHandle>::Signals>::new(),
                 }
             }
 
@@ -290,7 +283,7 @@ pub fn expand_actor(attrs: TokenStream, input: TokenStream) -> TokenStream {
                 )
             }
 
-            pub async fn next_command(&self) -> <#handle_item as ::rapid_types::ActorHandle>::Command {
+            pub async fn next_command(&self) -> <#handle_item as ::ivy_types::ActorHandle>::Command {
                 self.cmd_channel.receive().await
             }
         }
@@ -311,20 +304,12 @@ impl Parse for SpawnInput {
         input.parse::<Token![,]>()?;
         let actor: Expr = input.parse()?;
 
-        Ok(SpawnInput {
-            spawner,
-            actor_type,
-            actor,
-        })
+        Ok(SpawnInput { spawner, actor_type, actor })
     }
 }
 
 pub fn expand_spawn_actor(input: TokenStream) -> TokenStream {
-    let SpawnInput {
-        spawner,
-        actor_type,
-        actor,
-    } = parse_macro_input!(input as SpawnInput);
+    let SpawnInput { spawner, actor_type, actor } = parse_macro_input!(input as SpawnInput);
 
     let expanded = quote! {
         {
@@ -334,7 +319,7 @@ pub fn expand_spawn_actor(input: TokenStream) -> TokenStream {
             #[::embassy_executor::task]
             async fn __embassy_actor_task(mut instance: #actor_type) -> ! {
                 // Fully qualified trait call: the compiler infers the concrete type for `_`
-                // Swap out `SomeTrait` for your actual trait path (e.g., ::rapid_types::Actor)
+                // Swap out `SomeTrait` for your actual trait path (e.g., ::ivy_types::Actor)
                 < _ as Runnable>::run(instance).await
             }
 

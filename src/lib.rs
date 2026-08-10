@@ -1,5 +1,5 @@
 #![no_std]
 
-pub use rapid_core::*;
-pub use rapid_macros as macros;
-pub use rapid_types as types;
+pub use ivy_core::*;
+pub use ivy_macros as macros;
+pub use ivy_types as types;

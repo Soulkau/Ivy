@@ -1,5 +1,5 @@
 [package]
-name = "rapid-macros"
+name = "ivy-macros"
 version = "0.1.0"
 edition = "2024"
 
@@ -7,7 +7,7 @@ edition = "2024"
 proc-macro = true
 
 [dependencies]
-rapid-types = {path="../rapid-types"}
+ivy-types = {path="../ivy-types"}
 proc-macro2.workspace = true
 quote.workspace = true
 syn.workspace = true
