@@ -41,11 +41,7 @@ impl<F: NorFlash> StorageModule<F> {
     pub async fn get<D: for<'de> Deserialize<'de>>(&self, key: StorageKey) -> Option<D> {
         let mut guard = self.inner.lock().await;
         let inner = &mut *guard; // reborrow to satisfy borrow checker
-        let item_data = inner
-            .storage
-            .fetch_item(&mut inner.read_buf, key.as_ref())
-            .await
-            .ok()??;
+        let item_data = inner.storage.fetch_item(&mut inner.read_buf, key.as_ref()).await.ok()??;
 
         let data: D = postcard::from_bytes(item_data).ok()?;
 
@@ -57,20 +53,15 @@ impl<F: NorFlash> StorageModule<F> {
         let inner = &mut *guard; // reborrow to satisfy borrow checker
 
         let serialized: &[u8] = postcard::to_slice(value, &mut inner.read_buf).unwrap();
-        let _ = inner
-            .storage
-            .store_item(&mut inner.work_buf, &key.as_ref(), &serialized)
-            .await;
+        let _ = inner.storage.store_item(&mut inner.work_buf, &key.as_ref(), &serialized).await;
     }
 }
 
 #[macro_export]
-macro_rules! mk_storage {
+macro_rules! init_storage {
     ($flash_ty:ty, $flash:expr, $map_config:expr) => {{
-        static CELL: static_cell::StaticCell<$crate::storage::Inner<$flash_ty>> =
-            static_cell::StaticCell::new();
-        let storage_ref = CELL
-            .init_with(|| $crate::storage::StorageModule::<$flash_ty>::build($flash, $map_config));
+        static CELL: static_cell::StaticCell<$crate::storage::Inner<$flash_ty>> = static_cell::StaticCell::new();
+        let storage_ref = CELL.init_with(|| $crate::storage::StorageModule::<$flash_ty>::build($flash, $map_config));
         $crate::storage::StorageModule::from_static(storage_ref)
     }};
 }
