@@ -7,7 +7,6 @@ use core::{marker::PhantomData, ops::Deref};
 
 use embedded_storage::nor_flash::NorFlash;
 use embedded_tls::CryptoRngCore;
-use ivy_types::Runnable;
 use talky::{
     device::{DeviceActionHandler, DeviceProtocol},
     id::DeviceID,
@@ -24,11 +23,11 @@ pub mod wifi;
 pub struct Ivy<A, F, Trng>
 where
     F: NorFlash + 'static,
-    A: DeviceActionHandler + Runnable,
+    A: DeviceActionHandler,
     Trng: CryptoRngCore + 'static,
 {
     bluetooth: BluetoothHandle,
-    wifi: WifiModule,
+    wifi: WifiModule, //Currently, just assume kind user have turned on wifi.
     mqtt: MqttModule<Trng>,
     storage: StorageModule<F>,
     metadata: &'static DeviceMetadata,
@@ -38,7 +37,7 @@ where
 impl<A, F, Trng> Deref for Ivy<A, F, Trng>
 where
     F: NorFlash,
-    A: DeviceActionHandler + Runnable,
+    A: DeviceActionHandler,
     Trng: CryptoRngCore,
 {
     type Target = A;
@@ -51,7 +50,7 @@ where
 
 impl<A, F, Trng> Ivy<A, F, Trng>
 where
-    A: DeviceActionHandler + Runnable,
+    A: DeviceActionHandler,
     F: NorFlash,
     Trng: CryptoRngCore,
 {

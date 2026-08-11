@@ -3,8 +3,8 @@ use bbqueue::nicknames::Memphis;
 use bbqueue::prod_cons::stream::{StreamConsumer, StreamProducer};
 use bbqueue::traits::notifier::{AsyncNotifier, Notifier};
 use embassy_time::Timer;
-use ivy_macros::{actor, actor_handle};
-use ivy_types::Runnable;
+use ivy_macros::actor_handle;
+use ivy_types::actor::{Actor, ActorHandle, Inbox};
 use serde::{Deserialize, Serialize};
 use talky::commands::action::ActionCommand;
 use talky::commands::ping::{PingCommand, PingResponse};
@@ -465,7 +465,6 @@ where
     async fn request_connection(&self) -> Option<TransportIO<Protocol>>;
 }
 
-#[actor(ConnectionHandle<Protocol>)]
 pub struct ConnectionModule<Protocol, ActionHandler>
 where
     Protocol: DeviceProtocol,
@@ -477,36 +476,38 @@ where
     handler: ActionHandler,
 }
 
-impl<Protocol, ActionHandler> Runnable for ConnectionModule<Protocol, ActionHandler>
+impl<Protocol, ActionHandler> Actor for ConnectionModule<Protocol, ActionHandler>
 where
     Protocol: DeviceProtocol,
     ActionHandler: DeviceActionHandler<Protocol = Protocol> + Clone,
     [u8; Protocol::OUTGOING_PAYLOAD_SIZE]: Sized + 'static,
     [u8; Protocol::INCOMING_PAYLOAD_SIZE]: Sized + 'static,
 {
-    async fn run(self) -> ! {
+    type Handle = ConnectionHandle<Protocol>;
+
+    async fn act(&mut self, mut inbox: Inbox<<Self::Handle as ActorHandle>::Cmd>) -> ! {
         let mut auth_runner = pin!(ConnectionRunner::Idle);
         let mut conn_runner = pin!(ConnectionRunner::Idle);
         loop {
-            match select3(self.next_command(), auth_runner.as_mut(), conn_runner.as_mut()).await {
+            match select3(inbox.next(), auth_runner.as_mut(), conn_runner.as_mut()).await {
                 Either3::First(command) => match command {
                     ConnectionApiCommand::RequestConnection(consumer) => {
                         if !auth_runner.is_idle() {
                             tracing::warn!("[ConnectionModule] Auth runner is busy");
-                            consumer.reply(None);
+                            consumer.reply(None).await;
                             continue;
                         }
 
                         let slot = self.try_acquire_any();
                         if let Some(slot) = slot {
                             tracing::info!("[ConnectionModule] Acquired slot, creating connection");
-                            consumer.reply(Some(slot.1));
+                            consumer.reply(Some(slot.1)).await;
                             let connection = Connection::new(Init {}, slot.0);
                             auth_runner.as_mut().set(connection.authorise());
                             continue;
                         }
                         tracing::warn!("[ConnectionModule] No slot available");
-                        consumer.reply(None);
+                        consumer.reply(None).await;
                     }
                 },
                 Either3::Second(maybe_connection) => {

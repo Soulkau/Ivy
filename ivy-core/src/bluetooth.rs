@@ -1,8 +1,8 @@
 use embassy_futures::select::{Either, select};
 use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, channel::Channel};
 use heapless::Vec as HVec;
-use ivy_macros::{actor, actor_handle};
-use ivy_types::Runnable;
+use ivy_macros::actor_handle;
+use ivy_types::actor::*;
 use talky::bluetooth::DeviceAdvertisimentInfo;
 use trouble_host::{Address, Controller, Host, HostResources, prelude::*};
 
@@ -19,16 +19,24 @@ trait BluetoothHandleTrait {
     async fn stop_advertising(&self);
 }
 
-#[actor(BluetoothHandle)]
 pub struct BluetoothModule<C: Controller + 'static> {
     controller: Option<C>,
     device_meta: &'static DeviceMetadata,
 }
 
-impl<C: Controller> BluetoothModule<C> {}
+impl<C: Controller + 'static> BluetoothModule<C> {
+    pub fn new(controller: C, device_meta: &'static DeviceMetadata) -> Self {
+        Self {
+            controller: Some(controller),
+            device_meta,
+        }
+    }
+}
 
-impl<C: Controller + 'static> Runnable for BluetoothModule<C> {
-    async fn run(mut self) -> ! {
+impl<C: Controller + 'static> Actor for BluetoothModule<C> {
+    type Handle = BluetoothHandle;
+
+    async fn act(&mut self, mut inbox: Inbox<<Self::Handle as ActorHandle>::Cmd>) -> ! {
         let mut resources: HostResources<DefaultPacketPool, 1, 1> = HostResources::new();
         //TODO: Get a real address generation
         let stack = trouble_host::new(self.controller.take().expect("Failed to take controller"), &mut resources).set_random_address(Address::random([22, 111, 251, 222, 45, 55]));
@@ -59,15 +67,15 @@ impl<C: Controller + 'static> Runnable for BluetoothModule<C> {
         .unwrap();
         let advirtisement = Advertisiment { advertiser_data, len };
         loop {
-            let command = self.next_command();
+            let command = inbox.next();
 
             match select(command, async {}).await {
                 Either::First(cmd) => match cmd {
                     BluetoothHandleTraitCommand::StartAdvertising(consumer) => {
-                        consumer.reply(());
+                        consumer.ack().await;
                     }
                     BluetoothHandleTraitCommand::StopAdvertising(consumer) => {
-                        consumer.reply(());
+                        consumer.ack().await;
                     }
                 },
                 Either::Second(_) => { /* reconnect logic */ }

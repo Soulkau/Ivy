@@ -6,6 +6,9 @@ edition = "2024"
 [workspace]
 members=["ivy-core", "ivy-types", "ivy-macros"]
 resolver="2"
+exclude = [
+    "templates"
+]
 [workspace.dependencies]
 talky = { path = "../talky" }
 
@@ -28,6 +31,7 @@ enum_dispatch = {version ="0.3.13"}
 const_panic = "0.2.15"
 bbqueue = "0.7.0"
 mqttrust = { path = "../mqttrust", features = ["defmt", "embedded-tls", "mqttv3"], default-features=false  }
+tracing = {version = "0.1.44", default-features = false }
 
 #Embedded abtractions
 embedded-io = "0.7.1"
@@ -52,7 +56,7 @@ heck = "0.5.0"
 
 # Tests
 tokio = {version = "1.53.1", features = ["full"] }
-tracing = {version = "0.1.44" }
+
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 critical-section = { version = "1.2.0", features = ["std"] }
 
