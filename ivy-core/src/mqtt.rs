@@ -9,6 +9,7 @@ use embassy_net::{
     tcp::client::{TcpClient, TcpClientState},
 };
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
+use embassy_time::{Duration, Timer};
 use embedded_tls::{Aes128GcmSha256, CryptoRng, CryptoRngCore, TlsConfig, UnsecureProvider};
 use ivy_types::actor::Actor;
 use mqttrust::{
@@ -38,6 +39,10 @@ impl<Rng: CryptoRngCore> MqttModule<Rng> {
     }
 
     pub async fn run(&mut self) -> ! {
+        while !self.stack.is_config_up() {
+            Timer::after(Duration::from_millis(500)).await;
+        }
+
         tracing::info!("[MqttModule] Running MQTT module");
         static MQTT_STATE: StaticCell<State<CriticalSectionRawMutex, MAX_NET_PAYLOAD_SIZE, MAX_NET_PAYLOAD_SIZE>> = StaticCell::new();
         let state = MQTT_STATE.init(State::new());
