@@ -12,8 +12,7 @@ use serde::{Deserialize, Serialize};
 
 pub struct StorageInner<F: NorFlash> {
     storage: MapStorage<u32, BlockingAsync<F>, NoCache>,
-    read_buf: [u8; 128],
-    write_buf: [u8; 128],
+    ser_buf: [u8; 256],
     work_buf: [u8; 256],
 }
 
@@ -28,8 +27,7 @@ impl<F: NorFlash> StorageModule<F> {
     pub fn build(flash: F, map_config: MapConfig<BlockingAsync<F>>) -> Inner<F> {
         Mutex::new(StorageInner {
             storage: MapStorage::new(BlockingAsync::new(flash), map_config, NoCache::new()),
-            read_buf: [0u8; 128],
-            write_buf: [0u8; 128],
+            ser_buf: [0u8; 256],
             work_buf: [0u8; 256],
         })
     }
@@ -41,7 +39,7 @@ impl<F: NorFlash> StorageModule<F> {
     pub async fn get<D: for<'de> Deserialize<'de>>(&self, key: StorageKey) -> Option<D> {
         let mut guard = self.inner.lock().await;
         let inner = &mut *guard; // reborrow to satisfy borrow checker
-        let item_data = inner.storage.fetch_item(&mut inner.read_buf, key.as_ref()).await.ok()??;
+        let item_data = inner.storage.fetch_item(&mut inner.ser_buf, key.as_ref()).await.ok()??;
 
         let data: D = postcard::from_bytes(item_data).ok()?;
 
@@ -52,7 +50,7 @@ impl<F: NorFlash> StorageModule<F> {
         let mut guard = self.inner.lock().await;
         let inner = &mut *guard; // reborrow to satisfy borrow checker
 
-        let serialized: &[u8] = postcard::to_slice(value, &mut inner.read_buf).unwrap();
+        let serialized: &[u8] = postcard::to_slice(value, &mut inner.ser_buf).unwrap();
         let _ = inner.storage.store_item(&mut inner.work_buf, &key.as_ref(), &serialized).await;
     }
 }
