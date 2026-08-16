@@ -82,7 +82,7 @@ impl<Rng: CryptoRngCore, const MAX_MESSAGE_SIZE: usize> Actor for MqttModule<Rng
                     let log = LOG_CHANNEL.receive().await;
                     let serialized = postcard::to_slice(&log, &mut work_buf).unwrap();
                     client
-                        .publish(Publish::builder().topic_name("mushclim/log").payload(&*serialized).qos(mqttrust::QoS::AtLeastOnce).build())
+                        .publish(Publish::builder().topic_name("test/mushclim/log").payload(&*serialized).qos(mqttrust::QoS::AtLeastOnce).build())
                         .await
                         .unwrap();
                 };
@@ -99,7 +99,7 @@ impl<Rng: CryptoRngCore, const MAX_MESSAGE_SIZE: usize> Actor for MqttModule<Rng
     }
 }
 
-impl<Rng: CryptoRngCore, const MAX_MESSAGE_SIZE: usize> MqttModule<Rng, MAX_MESSAGE_SIZE> {
+impl<Rng: CryptoRngCore, const MAX_MESSAGE_SIZE: usize, const MAX_SUBSCRIBERS: usize> MqttModule<Rng, MAX_MESSAGE_SIZE, MAX_SUBSCRIBERS> {
     pub fn new(stack: Stack<'static>, trng: Rng) -> Self {
         Self { stack, trng: Some(trng) }
     }
