@@ -1321,6 +1321,7 @@ dependencies = [
 [[package]]
 name = "mqttrust"
 version = "1.0.0"
+source = "git+https://github.com/Soulkau/mqttrust.git#e2e24321ad074e232c7ea30bdb998433f9b4ffdf"
 dependencies = [
  "bon",
  "embassy-futures",
@@ -1926,7 +1927,7 @@ dependencies = [
 [[package]]
 name = "talky"
 version = "0.1.0"
-source = "git+https://github.com/Soulkau/Talky.git#884e6bc59cd0796c7e0b32cf1395a13498fb18e4"
+source = "git+https://github.com/Soulkau/Talky.git?tag=v0.1#f73f8effc2af46d2682e97c7f4d3f3f91423ee21"
 dependencies = [
  "talky-core",
  "talky-types",
@@ -1935,7 +1936,7 @@ dependencies = [
 [[package]]
 name = "talky-core"
 version = "0.1.0"
-source = "git+https://github.com/Soulkau/Talky.git#884e6bc59cd0796c7e0b32cf1395a13498fb18e4"
+source = "git+https://github.com/Soulkau/Talky.git?tag=v0.1#f73f8effc2af46d2682e97c7f4d3f3f91423ee21"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1965,7 +1966,7 @@ dependencies = [
 [[package]]
 name = "talky-types"
 version = "0.1.0"
-source = "git+https://github.com/Soulkau/Talky.git#884e6bc59cd0796c7e0b32cf1395a13498fb18e4"
+source = "git+https://github.com/Soulkau/Talky.git?tag=v0.1#f73f8effc2af46d2682e97c7f4d3f3f91423ee21"
 dependencies = [
  "heapless 0.9.3",
  "serde",
