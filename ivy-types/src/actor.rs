@@ -114,7 +114,7 @@ pub mod rt {
 
         // We guarantee that channel lives until we've been notified on it, at which
         // point its out of reach for the replier.
-        let reply_to = unsafe { core::mem::transmute::<&embassy_sync::channel::DynamicSender<'_, T>, &embassy_sync::channel::DynamicSender<'_, T>>(&sender) };
+        let reply_to = unsafe { core::mem::transmute::<&embassy_sync::channel::DynamicSender<'_, T>, &'static embassy_sync::channel::DynamicSender<'_, T>>(&sender) };
 
         let consumer = ReplyConsumer::new(reply_to);
 
