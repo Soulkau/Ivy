@@ -5,9 +5,13 @@ use embassy_sync::{
     channel::Channel,
 };
 use talky::logs::{BufVisitor, DeviceLog, LogLevel};
-use tracing::{Level, Subscriber, span};
+use tracing::{Dispatch, Level, Subscriber, span};
 
 pub static LOG_CHANNEL: Channel<CriticalSectionRawMutex, DeviceLog, 16> = Channel::new();
+
+pub fn init_mqtt_logger() {
+    tracing::dispatcher::set_global_default(Dispatch::new(SendLogger::new(Level::DEBUG))).unwrap();
+}
 
 pub struct SendLogger {
     max_level: Level,
@@ -18,7 +22,7 @@ impl SendLogger {
     pub fn new(max_level: Level) -> Self {
         Self {
             max_level,
-            next_id: AtomicU32::new(0),
+            next_id: AtomicU32::new(1),
         }
     }
 }

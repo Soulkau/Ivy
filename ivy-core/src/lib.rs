@@ -3,19 +3,17 @@
 #![feature(unsafe_cell_access)]
 #![allow(incomplete_features)]
 
-use core::{marker::PhantomData, ops::Deref};
+use core::ops::Deref;
 
 use embedded_storage::nor_flash::NorFlash;
 use embedded_tls::CryptoRngCore;
-use talky::{
-    device::{DeviceActionHandler, DeviceProtocol},
-    id::DeviceID,
-};
+use talky::device::DeviceActionHandler;
 
 use crate::{bluetooth::BluetoothHandle, device::DeviceMetadata, mqtt::MqttModule, storage::StorageModule, wifi::WifiModule};
 pub mod bluetooth;
 pub mod connection;
 pub mod device;
+pub mod logger;
 pub mod mqtt;
 pub mod storage;
 pub mod wifi;
