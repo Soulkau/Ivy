@@ -79,7 +79,7 @@ impl<Rng: CryptoRngCore> MqttModule<Rng> {
             let mut subscription = client.subscribe::<1>(Subscribe::builder().topics(&topics).build()).await.unwrap();
 
             tracing::info!("[MqttModule] Running MQTT client task");
-
+            let mut work_buf = [0u8; 1024];
             loop {
                 let log_sending_task = async {
                     let mut work_buf = [0u8; 256];
