@@ -26,11 +26,10 @@ futures-util = { version = "0.3.32", default-features = false }
 pin-project = "1.1.11"
 serde_json = { version = "1.0.149", default-features = false, features = ["alloc"] }
 serde-json-core = "0.6.0"
-defmt = "1.1.1"
 enum_dispatch = {version ="0.3.13"}
 const_panic = "0.2.15"
 bbqueue = "0.7.0"
-mqttrust = { path = "../mqttrust", features = ["defmt", "embedded-tls", "mqttv3"], default-features=false  }
+mqttrust = { path = "../mqttrust", features = ["log", "embedded-tls", "mqttv3"], default-features=false  }
 tracing = {version = "0.1.44", default-features = false }
 
 #Embedded abtractions
