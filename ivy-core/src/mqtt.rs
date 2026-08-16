@@ -11,11 +11,13 @@ use embassy_net::{
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_time::{Duration, Timer};
 use embedded_tls::{Aes128GcmSha256, CryptoRng, CryptoRngCore, TlsConfig, UnsecureProvider};
+use ivy_macros::actor_handle;
 use ivy_types::actor::Actor;
 use mqttrust::{
-    Config, IpBroker, Publish, State, Subscribe,
+    Config, IpBroker, MqttClient, MqttStack, Publish, State, Subscribe,
     transport::embedded_tls::{TlsNalTransport, TlsState},
 };
+use serde::Serialize;
 use static_cell::StaticCell;
 
 use crate::logger::LOG_CHANNEL;
@@ -28,51 +30,46 @@ const TLS_BUFFER_SIZE: usize = 16640;
 
 const _: () = assert!(MAX_NET_PAYLOAD_SIZE + 500 <= TLS_BUFFER_SIZE);
 
-pub struct MqttModule<Rng: CryptoRngCore + 'static> {
+#[actor_handle(MqttHandle)]
+pub trait MqttHandle<const MAX_MESSAGE_SIZE: usize> {
+    async fn __publish(&self, topic: &'static str, payload: [u8; MAX_MESSAGE_SIZE], len: usize);
+
+    async fn subscribe(&self, topic: &'static str);
+}
+
+impl<const MAX_MESSAGE_SIZE: usize> MqttHandle<MAX_MESSAGE_SIZE> {
+    async fn publish<S: Serialize>(&self, topic: &'static str, data: S) {
+        let mut buffer = [0u8; MAX_MESSAGE_SIZE];
+        let payload = match serde_json_core::to_slice(&data, &mut buffer) {
+            Ok(payload) => payload,
+            Err(_) => return,
+        };
+        self.__publish(topic, buffer, payload).await;
+    }
+}
+
+pub struct MqttModule<Rng: CryptoRngCore + 'static, const MAX_MESSAGE_SIZE: usize> {
     stack: Stack<'static>,
     trng: Option<Rng>,
 }
 
-impl<Rng: CryptoRngCore> MqttModule<Rng> {
-    pub fn new(stack: Stack<'static>, trng: Rng) -> Self {
-        Self { stack, trng: Some(trng) }
-    }
+impl<Rng: CryptoRngCore, const MAX_MESSAGE_SIZE: usize> Actor for MqttModule<Rng, MAX_MESSAGE_SIZE> {
+    type Handle = MqttHandle<MAX_MESSAGE_SIZE>;
 
-    pub async fn run(&mut self) -> ! {
+    async fn act(&mut self, inbox: ivy_types::actor::Inbox<<Self::Handle as ivy_types::actor::ActorHandle>::Cmd>) -> ! {
         while !self.stack.is_config_up() {
             Timer::after(Duration::from_millis(500)).await;
         }
+        tracing::info!("[MqttModule] Creating MQTT stack and client");
+        let (mqtt_stack, client) = self.setup_mqtt();
+        tracing::info!("[MqttModule] MQTT stack and client created");
 
-        tracing::info!("[MqttModule] Running MQTT module");
-        static MQTT_STATE: StaticCell<State<CriticalSectionRawMutex, MAX_NET_PAYLOAD_SIZE, MAX_NET_PAYLOAD_SIZE>> = StaticCell::new();
-        let state = MQTT_STATE.init(State::new());
-        let configuration = Config::builder()
-            .client_id("cool-id".try_into().unwrap())
-            .password(option_env!("NATS_PASS").unwrap().as_ref())
-            .username(option_env!("NATS_USER").unwrap().as_ref())
-            .build();
-        tracing::info!("[MqttModule] MQTT configuration built");
+        tracing::info!("[MqttModule] Creating MQTT stack task");
+        let trng = self.trng.take().expect("This should never fail");
+        let network_stack = self.stack;
 
-        let (mut mqtt_stack, client) = mqttrust::new(state, configuration);
-        tracing::info!("[MqttModule] MQTT stack created");
-
-        let stack = self.stack;
-        tracing::info!("Staring future 1");
-
-        tracing::info!("[MqttModule] Configurating MQTT transport");
-        let broker = IpBroker::new(Ipv4Addr::new(217, 195, 48, 206), 1883);
-        let tls_config = TlsConfig::new().enable_rsa_signatures();
-        let tcp_state = TcpClientState::<1, TCP_BUFFER_SIZE, TCP_BUFFER_SIZE>::new();
-        let network = TcpClient::<'_, 1, TCP_BUFFER_SIZE, TCP_BUFFER_SIZE>::new(stack, &tcp_state);
-        let tls_state = TlsState::<TLS_BUFFER_SIZE, TLS_BUFFER_SIZE>::new();
-        let provider = UnsecureProvider::new::<Aes128GcmSha256>(self.trng.take().expect("This should never fail"));
-        let mut transport = TlsNalTransport::new(&network, broker, &tls_state, &tls_config, provider);
-        tracing::info!("[MqttModule] MQTT transport created");
-        let mqtt_task = async move {
-            loop {
-                mqtt_stack.run(&mut transport).await
-            }
-        };
+        let mqtt_stack_task = self.run_mqtt_stack(mqtt_stack, network_stack, trng);
+        tracing::info!("[MqttModule] MQTT stack task created");
 
         let client_task = async move {
             let topics = ["mushclim/listen".into()];
@@ -82,7 +79,6 @@ impl<Rng: CryptoRngCore> MqttModule<Rng> {
             let mut work_buf = [0u8; 1024];
             loop {
                 let log_sending_task = async {
-                    let mut work_buf = [0u8; 256];
                     let log = LOG_CHANNEL.receive().await;
                     let serialized = postcard::to_slice(&log, &mut work_buf).unwrap();
                     client
@@ -99,9 +95,39 @@ impl<Rng: CryptoRngCore> MqttModule<Rng> {
             }
         };
 
-        join(client_task, mqtt_task).await;
-        tracing::info!("Starting future 2, we join them duh");
+        join(client_task, mqtt_stack_task).await.0
+    }
+}
 
-        unreachable!()
+impl<Rng: CryptoRngCore, const MAX_MESSAGE_SIZE: usize> MqttModule<Rng, MAX_MESSAGE_SIZE> {
+    pub fn new(stack: Stack<'static>, trng: Rng) -> Self {
+        Self { stack, trng: Some(trng) }
+    }
+
+    fn setup_mqtt(&self) -> (MqttStack<'static, CriticalSectionRawMutex>, MqttClient<'static, CriticalSectionRawMutex>) {
+        static MQTT_STATE: StaticCell<State<CriticalSectionRawMutex, MAX_NET_PAYLOAD_SIZE, MAX_NET_PAYLOAD_SIZE>> = StaticCell::new();
+        let state = MQTT_STATE.init(State::new());
+        let configuration = Config::builder()
+            .client_id("mushclim-dev".try_into().unwrap())
+            .password(option_env!("NATS_PASS").unwrap().as_ref())
+            .username(option_env!("NATS_USER").unwrap().as_ref())
+            .build();
+        tracing::info!("[MqttModule] MQTT configuration built");
+
+        mqttrust::new(state, configuration)
+    }
+
+    async fn run_mqtt_stack(&self, mut mqtt_stack: MqttStack<'static, CriticalSectionRawMutex>, network_stack: Stack<'static>, trng: Rng) -> ! {
+        let broker = IpBroker::new(Ipv4Addr::new(217, 195, 48, 206), 1883);
+        let tls_config = TlsConfig::new().enable_rsa_signatures();
+        let tcp_state = TcpClientState::<1, TCP_BUFFER_SIZE, TCP_BUFFER_SIZE>::new();
+        let network = TcpClient::<'_, 1, TCP_BUFFER_SIZE, TCP_BUFFER_SIZE>::new(network_stack, &tcp_state);
+        let tls_state = TlsState::<TLS_BUFFER_SIZE, TLS_BUFFER_SIZE>::new();
+        let provider = UnsecureProvider::new::<Aes128GcmSha256>(trng);
+        let mut transport = TlsNalTransport::new(&network, broker, &tls_state, &tls_config, provider);
+        tracing::info!("[MqttModule] MQTT stack transport created");
+        loop {
+            mqtt_stack.run(&mut transport).await
+        }
     }
 }
