@@ -10,7 +10,7 @@ exclude = [
     "templates"
 ]
 [workspace.dependencies]
-talky = { path = "../talky" }
+talky = { git = "https://github.com/Soulkau/Talky.git", tag="v0.1" }
 
 # Main
 trouble-host = "0.5.0"
@@ -29,7 +29,7 @@ serde-json-core = "0.6.0"
 enum_dispatch = {version ="0.3.13"}
 const_panic = "0.2.15"
 bbqueue = "0.7.0"
-mqttrust = { path = "../mqttrust", features = ["log", "embedded-tls", "mqttv3"], default-features=false  }
+mqttrust = { git = "https://github.com/Soulkau/mqttrust.git", features = ["log", "embedded-tls", "mqttv3"], default-features=false  }
 tracing = {version = "0.1.44", default-features = false }
 
 #Embedded abtractions
