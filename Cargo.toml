@@ -31,6 +31,7 @@ const_panic = "0.2.15"
 bbqueue = "0.7.0"
 mqttrust = { git = "https://github.com/Soulkau/mqttrust.git", features = ["log", "embedded-tls", "mqttv3"], default-features=false  }
 tracing = {version = "0.1.44", default-features = false }
+thiserror = { version = "2.0.18", default-features = false }
 
 #Embedded abtractions
 embedded-io = "0.7.1"
@@ -52,6 +53,7 @@ proc-macro2 = "1.0.106"
 quote = "1.0.42"
 syn = {version = "3.0.3", features = ["full"] }
 heck = "0.5.0"
+paste = "1.0.15"
 
 # Tests
 tokio = {version = "1.53.1", features = ["full"] }
