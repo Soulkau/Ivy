@@ -11,6 +11,7 @@ use embassy_net::{
 use embassy_sync::{
     blocking_mutex::raw::CriticalSectionRawMutex,
     channel::{DynamicReceiver, DynamicSender},
+    signal::Signal,
 };
 use embassy_time::{Duration, Timer};
 use embedded_tls::{Aes128GcmSha256, CryptoRng, CryptoRngCore, TlsConfig, UnsecureProvider};
@@ -45,18 +46,18 @@ pub enum MqttError {
 }
 
 pub struct Subscription<T: 'static> {
-    receiver: DynamicReceiver<'static, T>,
+    receiver: &'static Signal<CriticalSectionRawMutex, T>,
 }
 
 impl<T: 'static> Subscription<T> {
-    pub fn new(receiver: DynamicReceiver<'static, T>) -> Self {
+    pub fn new(receiver: &'static Signal<CriticalSectionRawMutex, T>) -> Self {
         Self { receiver }
     }
 }
 
 impl<T: 'static> Subscription<T> {
     pub async fn recv(&self) -> T {
-        self.receiver.receive().await
+        self.receiver.wait().await
     }
 }
 
@@ -67,12 +68,12 @@ pub trait ErasedHandle: Send + Sync {
 
 // the concrete, per-T impl
 pub struct TypedHandle<T: 'static> {
-    sender: DynamicSender<'static, T>,
+    signal: &'static Signal<CriticalSectionRawMutex, T>,
 }
 
 impl<T: 'static> TypedHandle<T> {
-    pub fn new(sender: DynamicSender<'static, T>) -> Self {
-        Self { sender }
+    pub fn new(signal: &'static Signal<CriticalSectionRawMutex, T>) -> Self {
+        Self { signal }
     }
 }
 
@@ -88,8 +89,8 @@ where
 {
     fn dispatch(&self, buf: &[u8]) -> Result<(), MqttError> {
         let (value, _) = serde_json_core::from_slice(buf).map_err(MqttError::Decode)?;
-
-        self.sender.try_send(value).map_err(|_| MqttError::Full)
+        self.signal.signal(value);
+        Ok(())
     }
 }
 
@@ -241,40 +242,32 @@ macro_rules! declare_topics {
         {
             $crate::paste::paste! {
                 $(
-                    static [<$name:upper _CHANNEL>]: ::embassy_sync::channel::Channel<
+                    static [<$name:upper _SIGNAL>]: ::embassy_sync::signal::Signal<
                         ::embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex,
                         $payload,
-                        2,
-                    > = ::embassy_sync::channel::Channel::new();
+                    > = ::embassy_sync::signal::Signal::new();
                 )+
-
                 pub struct SubscriberReg {
                     $( pub $name: $crate::mqtt::TypedHandle<$payload>, )+
                 }
-
                 impl SubscriberReg {
                     fn new() -> Self {
                         Self {
-                            $( $name: $crate::mqtt::TypedHandle::new([<$name:upper _CHANNEL>].dyn_sender()), )+
+                            $( $name: $crate::mqtt::TypedHandle::new(&[<$name:upper _SIGNAL>]), )+
                         }
                     }
                 }
             }
-
             // everything below is OUTSIDE paste!, so $crate:: stays intact
             static SUBSCRIBER_REG: ::static_cell::StaticCell<SubscriberReg> =
                 ::static_cell::StaticCell::new();
-
             let reg: &'static SubscriberReg = SUBSCRIBER_REG.init(SubscriberReg::new());
-
             let handles: [(&'static str, &'static dyn $crate::mqtt::ErasedHandle); $crate::count!($($name)+)] = [
                 $( ($topic, &reg.$name as &'static dyn $crate::mqtt::ErasedHandle), )+
             ];
-
             let subs = $crate::paste::paste! {
-                ( $( $crate::mqtt::Subscription::new([<$name:upper _CHANNEL>].dyn_receiver()), )+ )
+                ( $( $crate::mqtt::Subscription::new(&[<$name:upper _SIGNAL>]), )+ )
             };
-
             (handles, subs)
         }
     };
