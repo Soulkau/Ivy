@@ -25,6 +25,12 @@ impl ReplyConsumer<()> {
     }
 }
 
+impl<T> ReplyConsumer<Result<(), T>> {
+    pub async fn ack(&self) {
+        self.0.send(Ok(())).await;
+    }
+}
+
 pub type ActorSender<P, const QUEUE_SIZE: usize> = Sender<'static, NoopRawMutex, P, QUEUE_SIZE>;
 
 pub struct Inbox<P: 'static> {
