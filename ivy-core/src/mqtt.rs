@@ -168,8 +168,11 @@ impl<Rng: CryptoRngCore, const S: usize, const N: usize> Actor for MqttModule<Rn
                                 tracing::warn!("[MqttModule] No handle found for topic {}", msg.topic_name());
                                 continue;
                             };
-                            handle.1.dispatch(&msg.payload()).unwrap();
-                            tracing::info!("[MqttModule] Dispatched message for topic {}", msg.topic_name());
+                            let Err(e) = handle.1.dispatch(&msg.payload()) else {
+                                tracing::info!("[MqttModule] Dispatched message for topic {}", msg.topic_name());
+                                continue;
+                            };
+                            tracing::error!("[MqttModule] Failed to dispatch dispatch error: {}", e);
                         }
                         None => tracing::error!("[MqttModule] Received none"),
                     }
