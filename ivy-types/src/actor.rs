@@ -25,6 +25,18 @@ impl ReplyConsumer<()> {
     }
 }
 
+impl<T> ReplyConsumer<Result<(), T>> {
+    pub async fn ack(&self) {
+        self.0.send(Ok(())).await;
+    }
+}
+
+impl<T, E> ReplyConsumer<Result<T, E>> {
+    pub async fn ack_err(&self, err: E) {
+        self.0.send(Err(err)).await;
+    }
+}
+
 pub type ActorSender<P, const QUEUE_SIZE: usize> = Sender<'static, NoopRawMutex, P, QUEUE_SIZE>;
 
 pub struct Inbox<P: 'static> {
@@ -52,27 +64,21 @@ macro_rules! actor {
     // Form 1: Explicit actor type, actor instance, custom queue size
     ($spawner:expr, $ActorType:ty, $actor_expr:expr, $queue_size:expr) => {{
         type Cmd = <<$ActorType as $crate::actor::Actor>::Handle as $crate::actor::ActorHandle>::Cmd;
-
         // Static channel allocation
         static CHANNEL: ::static_cell::StaticCell<::embassy_sync::channel::Channel<::embassy_sync::blocking_mutex::raw::NoopRawMutex, Cmd, $queue_size>> = ::static_cell::StaticCell::new();
         let channel = CHANNEL.init(::embassy_sync::channel::Channel::new());
-
         // Static actor instance allocation
         static ACTOR: ::static_cell::StaticCell<$ActorType> = ::static_cell::StaticCell::new();
         let actor = ACTOR.init($actor_expr);
-
         // Task wrapper using the Actor::act method directly
         #[embassy_executor::task]
         async fn actor_task(actor: &'static mut $ActorType, receiver: ::embassy_sync::channel::DynamicReceiver<'static, Cmd>) -> ! {
             let inbox = $crate::actor::Inbox::new(receiver);
-            actor.act(inbox).await
+            <$ActorType as $crate::actor::Actor>::act(actor, inbox).await
         }
-
         $spawner.spawn(actor_task(actor, channel.dyn_receiver())).unwrap();
-
         <<$ActorType as $crate::actor::Actor>::Handle as $crate::actor::ActorHandle>::create(channel.dyn_sender())
     }};
-
     // Form 2: Defaults to a queue size of 4
     ($spawner:expr, $ActorType:ty, $actor_expr:expr) => {
         $crate::actor!($spawner, $ActorType, $actor_expr, 4)

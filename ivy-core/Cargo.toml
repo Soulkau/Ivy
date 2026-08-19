@@ -31,7 +31,8 @@ tracing.workspace = true
 mqttrust.workspace = true
 embassy-net.workspace = true
 embedded-tls.workspace = true
-
+thiserror.workspace = true
+paste.workspace = true
 
 [dev-dependencies]
 tokio.workspace = true
