@@ -1,8 +1,8 @@
-use core::{marker::PhantomData, net::Ipv4Addr};
+use core::net::Ipv4Addr;
 
 use embassy_futures::{
-    join::{join, join3},
-    select::{Either, select, select4},
+    join::join,
+    select::{select, select4},
 };
 use embassy_net::{
     Stack,
@@ -45,8 +45,10 @@ pub enum MqttError {
     Decode(#[from] serde_json_core::de::Error),
     #[error("encode error: {0}")]
     Encode(#[from] serde_json_core::ser::Error),
-    #[error("channel full")]
-    Full,
+    #[error("mqtt client error: {0:?}")]
+    MqttClient(mqttrust::Error),
+    #[error("Disconnected")]
+    Disconnected,
 }
 
 pub struct Subscription<T: 'static> {
@@ -114,7 +116,7 @@ impl<const MAX_MESSAGE_SIZE: usize> MqttHandle<MAX_MESSAGE_SIZE> {
             }
         };
         tracing::info!("[MqttHandle] Publishing");
-        self.__publish(topic, buffer, payload).await;
+        self.__publish(topic, buffer, payload).await.ok();
     }
 }
 
@@ -231,7 +233,7 @@ impl<Rng: CryptoRngCore, const S: usize, const N: usize> MqttModule<Rng, S, N> {
         loop {
             match inbox.next().await {
                 MqttHandleCommand::Publish(c, _, _, _) => {
-                    c.ack_err(MqttError::Full).await;
+                    c.ack_err(MqttError::Disconnected).await;
                 }
                 _ => {}
             }
@@ -248,7 +250,7 @@ impl<Rng: CryptoRngCore, const S: usize, const N: usize> MqttModule<Rng, S, N> {
                         Ok(_) => c.ack().await,
                         Err(e) => {
                             tracing::error!("[MqttModule] Failed to publish message to {}: {:?}", topic, e);
-                            c.ack_err(MqttError::Full).await;
+                            c.ack_err(MqttError::MqttClient(e)).await;
                         }
                     }
                 }
