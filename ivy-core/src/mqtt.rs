@@ -303,11 +303,11 @@ impl<Rng: CryptoRngCore, const S: usize, const N: usize> MqttModule<Rng, S, N> {
         let mut work_buf = [0u8; 1024];
         loop {
             let log = LOG_CHANNEL.receive().await;
-            let Ok(serialized) = postcard::to_slice(&log, &mut work_buf) else {
+            let Ok(serialized) = serde_json_core::to_slice(&log, &mut work_buf) else {
                 continue;
             };
             client
-                .publish(Publish::builder().topic_name("mushclim/log").payload(&*serialized).qos(mqttrust::QoS::AtMostOnce).build())
+                .publish(Publish::builder().topic_name("mushclim/log").payload(&work_buf[..serialized]).qos(mqttrust::QoS::AtMostOnce).build())
                 .await
                 .ok();
         }
