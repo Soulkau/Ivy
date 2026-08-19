@@ -8,10 +8,9 @@ use embassy_net::{
     Stack,
     tcp::client::{TcpClient, TcpClientState},
 };
-use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, signal::Signal};
+use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_time::{Duration, Timer};
-use embedded_tls::{Aes128GcmSha256, CryptoRngCore, TlsConfig, UnsecureProvider};
-use ivy_macros::actor_handle;
+use embedded_tls::{Aes128GcmSha256, CryptoRng, CryptoRngCore, TlsConfig, UnsecureProvider};
 use ivy_types::actor::Actor;
 use mqttrust::{
     Config, IpBroker, MqttClient, MqttStack, Publish, State, Subscribe, SubscribeTopic,
