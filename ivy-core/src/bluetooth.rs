@@ -1,5 +1,4 @@
 use embassy_futures::select::{Either, select};
-use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, channel::Channel};
 use heapless::Vec as HVec;
 use ivy_macros::actor_handle;
 use ivy_types::actor::*;
