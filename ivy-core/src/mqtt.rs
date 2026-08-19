@@ -62,7 +62,7 @@ impl<T: 'static> Subscription<T> {
 }
 
 impl<T: 'static> Subscription<T> {
-    pub async fn recv(&self) -> T {
+    pub async fn next(&self) -> T {
         self.receiver.wait().await
     }
 }
