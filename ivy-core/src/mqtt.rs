@@ -193,6 +193,7 @@ impl<Rng: CryptoRngCore, const S: usize, const N: usize> MqttModule<Rng, S, N> {
             stack.disconnect(&mut transport).await.ok(); // just to make sure, although after run returns it should just return an error
             transport.disconnect().ok(); // in case connection ended dirty
             stack.reset().await; // reset before trying to reconnect
+            tracing::info!("[MqttModule] Connection lost, reconnecting...");
         }
     }
 
@@ -205,7 +206,7 @@ impl<Rng: CryptoRngCore, const S: usize, const N: usize> MqttModule<Rng, S, N> {
         loop {
             // don't spin the workers up until we're actually connected
             client.wait_connected().await;
-            tracing::info!("[MqttModule] connected, starting worker tasks");
+            tracing::info!("[MqttModule] Connected, starting worker tasks");
 
             let inbox_task = Self::handle_inbox_task(client, inbox);
             let sub_task = self.handle_subscriptions(client, topics);
