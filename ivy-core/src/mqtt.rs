@@ -160,7 +160,7 @@ impl<Rng: CryptoRngCore, const S: usize, const N: usize> MqttModule<Rng, S, N> {
         static MQTT_STATE: StaticCell<State<CriticalSectionRawMutex, MAX_NET_PAYLOAD_SIZE, MAX_NET_PAYLOAD_SIZE>> = StaticCell::new();
         let state = MQTT_STATE.init(State::new());
         let configuration = Config::builder()
-            .client_id("mushclim-dev".try_into().expect("Failed to create client id"))
+            .client_id("mushclim".try_into().expect("Failed to create client id"))
             .password(option_env!("NATS_PASS").expect("Failed to get NATS_PASS").as_ref())
             .username(option_env!("NATS_USER").expect("Failed to get NATS_USER").as_ref())
             .build();
@@ -306,7 +306,7 @@ impl<Rng: CryptoRngCore, const S: usize, const N: usize> MqttModule<Rng, S, N> {
                 continue;
             };
             client
-                .publish(Publish::builder().topic_name("test/mushclim/log").payload(&*serialized).qos(mqttrust::QoS::AtMostOnce).build())
+                .publish(Publish::builder().topic_name("mushclim/log").payload(&*serialized).qos(mqttrust::QoS::AtMostOnce).build())
                 .await
                 .ok();
         }
