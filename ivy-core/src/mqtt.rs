@@ -179,7 +179,7 @@ impl<Rng: CryptoRngCore, const S: usize, const N: usize> MqttModule<Rng, S, N> {
         let tls_state = TLS_STATE.init_with(MqttTlsState::new);
         let tls_config = TLS_CONFIG.init_with(|| TlsConfig::new().enable_rsa_signatures());
 
-        let broker = IpBroker::new(Ipv4Addr::new(217, 195, 48, 206), 1883);
+        let broker = IpBroker::new(Ipv4Addr::new(192,168,88,250), 1883);
         let provider = UnsecureProvider::new::<Aes128GcmSha256>(rng);
 
         TlsNalTransport::new(network, broker, tls_state, tls_config, provider)
