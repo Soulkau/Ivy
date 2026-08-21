@@ -10,18 +10,30 @@ use tracing::{Dispatch, Level, Subscriber, span};
 pub static LOG_CHANNEL: Channel<CriticalSectionRawMutex, DeviceLog, 16> = Channel::new();
 
 pub fn init_mqtt_logger() {
-    tracing::dispatcher::set_global_default(Dispatch::new(SendLogger::new(Level::DEBUG))).unwrap();
+    tracing::dispatcher::set_global_default(Dispatch::new(SendLogger::new(Level::DEBUG, &LOG_CHANNEL))).unwrap();
+}
+
+pub trait LogSink: Sync {
+    fn try_send(&self, log: DeviceLog);
+}
+
+impl<const N: usize> LogSink for Channel<CriticalSectionRawMutex, DeviceLog, N> {
+    fn try_send(&self, log: DeviceLog) {
+        let _ = Channel::try_send(self, log);
+    }
 }
 
 pub struct SendLogger {
     max_level: Level,
+    sink: &'static dyn LogSink,
     next_id: AtomicU32,
 }
 
 impl SendLogger {
-    pub fn new(max_level: Level) -> Self {
+    pub fn new(max_level: Level, sink: &'static dyn LogSink) -> Self {
         Self {
             max_level,
+            sink,
             next_id: AtomicU32::new(1),
         }
     }
@@ -37,7 +49,7 @@ impl Subscriber for SendLogger {
         event.record(&mut visitor);
 
         let log = DeviceLog::new(LogLevel::from(event.metadata().level()), visitor.buf);
-        LOG_CHANNEL.try_send(log).ok();
+        self.sink.try_send(log);
     }
 
     fn new_span(&self, span: &span::Attributes<'_>) -> span::Id {
