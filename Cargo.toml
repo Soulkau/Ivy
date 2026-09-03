@@ -43,7 +43,7 @@ embedded-tls = { git = "https://github.com/drogue-iot/embedded-tls", rev = "426f
 bt-hci = "0.6.0"
 #Embassy
 embassy-net = { version = "0.9.1", features = ["dhcpv4", "medium-ethernet", "tcp", "udp", "dns", "dhcpv4"] }
-embassy-executor = { version = "0.9.0", features = [] }
+embassy-executor = { version = "0.10.0", features = [] }
 embassy-time = "0.5.0"
 embassy-embedded-hal = "0.6.0"
 embassy-sync = "0.7.2"
