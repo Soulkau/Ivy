@@ -67,12 +67,10 @@ impl<T: 'static> Subscription<T> {
     }
 }
 
-// the type-erased trait object goes in your registry
 pub trait ErasedHandle: Send + Sync {
     fn dispatch(&self, buf: &[u8]) -> Result<(), MqttError>;
 }
 
-// the concrete, per-T impl
 pub struct TypedHandle<T: 'static> {
     signal: &'static Signal<CriticalSectionRawMutex, T>,
 }
@@ -83,9 +81,9 @@ impl<T: 'static> TypedHandle<T> {
     }
 }
 
-// SAFETY: DynamicSender only exposes try_send, which goes through
-// the channel's internal critical-section mutex - it's fine to
-// call from multiple threads concurrently as long as T: Send.
+/* SAFETY: DynamicSender only exposes try_send, which goes through
+the channel's internal critical-section mutex - it's fine to
+call from multiple threads concurrently as long as T: Send. */
 unsafe impl<T: Send + 'static> Sync for TypedHandle<T> {}
 unsafe impl<T: Send + 'static> Send for TypedHandle<T> {}
 
@@ -168,7 +166,7 @@ impl<Rng: CryptoRngCore, const S: usize, const N: usize> MqttModule<Rng, S, N> {
 
         mqttrust::new(state, configuration)
     }
-
+    /// Creates underlying mqtt transport directly on ram.
     fn create_transport(network_stack: Stack<'static>, rng: Rng) -> MqttTlsTransport<Rng> {
         static TCP_STATE: StaticCell<MqttTcpClientState> = StaticCell::new();
         static TLS_STATE: StaticCell<MqttTlsState> = StaticCell::new();
@@ -184,7 +182,7 @@ impl<Rng: CryptoRngCore, const S: usize, const N: usize> MqttModule<Rng, S, N> {
 
         TlsNalTransport::new(network, broker, tls_state, tls_config, provider)
     }
-
+    /// Runs mqtt stack: handles wifi disconnects.
     async fn run_stack_task(mut stack: MqttStack<'static, CriticalSectionRawMutex>, mut transport: MqttTlsTransport<Rng>, network_stack: Stack<'static>) -> ! {
         loop {
             network_stack.wait_config_up().await;
@@ -197,6 +195,8 @@ impl<Rng: CryptoRngCore, const S: usize, const N: usize> MqttModule<Rng, S, N> {
         }
     }
 
+    /// Runs the main mqtt client task loop: waits for connection, races background workers
+    /// against disconnect detection, then drains the inbox until reconnected.
     async fn run_client_task(
         &self,
         client: &MqttClient<'static, CriticalSectionRawMutex>,
@@ -207,21 +207,21 @@ impl<Rng: CryptoRngCore, const S: usize, const N: usize> MqttModule<Rng, S, N> {
             // don't spin the workers up until we're actually connected
             client.wait_connected().await;
             tracing::info!("[MqttModule] Connected, starting worker tasks");
-
+            // Neither of those tasks, should ever return. Only point of failure is mqtt_client itself, if connection lost all of tasks would be cancelled anyways.
             let inbox_task = Self::handle_inbox_task(client, inbox);
             let sub_task = self.handle_subscriptions(client, topics);
             let log_task = Self::handle_log_sending(client);
             let disconnect_watch = Self::wait_for_disconnect(client);
 
-            // whichever future resolves first wins the select - the other three
-            // just get dropped in place, which cancels them.
+            // Neither of those futures, besides disconnect_watch ever returns.
             select4(inbox_task, sub_task, log_task, disconnect_watch).await;
 
             tracing::warn!("[MqttModule] connection lost, draining inbox until reconnect");
+            // Drain inbox till disconnected
             select(Self::drain_inbox_task(inbox), client.wait_connected()).await;
         }
     }
-
+    /// Task that waits for client disconnect
     async fn wait_for_disconnect(client: &MqttClient<'static, CriticalSectionRawMutex>) {
         loop {
             if !client.wait_connection_change().await {
@@ -229,7 +229,7 @@ impl<Rng: CryptoRngCore, const S: usize, const N: usize> MqttModule<Rng, S, N> {
             }
         }
     }
-
+    /// Drains inbox, so that it won't overflow with uncompleted publish requests.
     async fn drain_inbox_task(inbox: &mut ivy_types::actor::Inbox<<MqttHandle<S> as ivy_types::actor::ActorHandle>::Cmd>) -> ! {
         loop {
             match inbox.next().await {
@@ -240,7 +240,7 @@ impl<Rng: CryptoRngCore, const S: usize, const N: usize> MqttModule<Rng, S, N> {
             }
         }
     }
-
+    /// Handles inbox commands
     async fn handle_inbox_task(client: &MqttClient<'static, CriticalSectionRawMutex>, inbox: &mut ivy_types::actor::Inbox<<MqttHandle<S> as ivy_types::actor::ActorHandle>::Cmd>) {
         loop {
             match inbox.next().await {
@@ -259,8 +259,8 @@ impl<Rng: CryptoRngCore, const S: usize, const N: usize> MqttModule<Rng, S, N> {
             }
         }
     }
-
-    async fn handle_subscriptions(&self, client: &MqttClient<'static, CriticalSectionRawMutex>, topics: &[SubscribeTopic<'static>; N]) {
+    /// Manages subscriptions
+    async fn handle_subscriptions(&self, client: &MqttClient<'static, CriticalSectionRawMutex>, topics: &[SubscribeTopic<'static>; N]) -> ! {
         loop {
             tracing::info!("[MqttModule] Subscribing to topics");
             let mut back_off_ms = 2000;
@@ -298,8 +298,8 @@ impl<Rng: CryptoRngCore, const S: usize, const N: usize> MqttModule<Rng, S, N> {
             }
         }
     }
-
-    async fn handle_log_sending(client: &MqttClient<'static, CriticalSectionRawMutex>) {
+    /// Handles log sending
+    async fn handle_log_sending(client: &MqttClient<'static, CriticalSectionRawMutex>) -> ! {
         let mut work_buf = [0u8; 1024];
         loop {
             let log = LOG_CHANNEL.receive().await;
@@ -313,9 +313,9 @@ impl<Rng: CryptoRngCore, const S: usize, const N: usize> MqttModule<Rng, S, N> {
         }
     }
 }
-
+/// Macro to pre-declares subscriptions, that will be managed by mqtt durning app lifetime.
 #[macro_export]
-macro_rules! declare_topics {
+macro_rules! declare_subcriptions {
     ( $( $name:ident => $topic:literal : $payload:ty ),+ $(,)? ) => {
         {
             $crate::paste::paste! {
