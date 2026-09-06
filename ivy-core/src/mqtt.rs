@@ -23,6 +23,8 @@ use mqttrust::{
 use serde::{Serialize, de::DeserializeOwned};
 use static_cell::StaticCell;
 
+pub use mqttrust::State as MqttState;
+
 use crate::logger::LOG_CHANNEL;
 
 const MAX_NET_PAYLOAD_SIZE: usize = 4096;
@@ -33,11 +35,11 @@ const TLS_BUFFER_SIZE: usize = 16640;
 
 const _: () = assert!(MAX_NET_PAYLOAD_SIZE + 500 <= TLS_BUFFER_SIZE);
 
-type MqttTcpClientState = TcpClientState<1, TCP_BUFFER_SIZE, TCP_BUFFER_SIZE>;
-type MqttTcpClient = TcpClient<'static, 1, TCP_BUFFER_SIZE, TCP_BUFFER_SIZE>;
-type MqttTlsState = TlsState<TLS_BUFFER_SIZE, TLS_BUFFER_SIZE>;
+pub type MqttTcpClientState<const TCP: usize> = TcpClientState<1, TCP, TCP>;
+pub type MqttTcpClient<const TCP: usize> = TcpClient<'static, 1, TCP, TCP>;
+pub type MqttTlsState<const TLS: usize> = TlsState<TLS, TLS>;
+pub type MqttTlsTransport<Rng, const TCP: usize, const TLS: usize> = TlsNalTransport<'static, MqttTcpClient<TCP>, IpBroker, MqttProvider<Rng>, TLS, TLS>;
 type MqttProvider<Rng> = UnsecureProvider<'static, Aes128GcmSha256, Rng>;
-type MqttTlsTransport<Rng> = TlsNalTransport<'static, MqttTcpClient, IpBroker, MqttProvider<Rng>, TLS_BUFFER_SIZE, TLS_BUFFER_SIZE>;
 
 #[derive(Debug, thiserror::Error)]
 pub enum MqttError {
@@ -118,45 +120,44 @@ impl<const MAX_MESSAGE_SIZE: usize> MqttHandle<MAX_MESSAGE_SIZE> {
     }
 }
 
-pub struct MqttModule<Rng: CryptoRngCore + 'static, const MAX_MESSAGE_SIZE: usize, const N: usize> {
+pub struct MqttModule<Rng: CryptoRngCore + 'static, const S: usize, const N: usize, const NET: usize = 4096, const TCP: usize = 4096, const TLS: usize = 16640> {
     subscribers: [(&'static str, &'static dyn ErasedHandle); N],
-    stack: Stack<'static>,
-    trng: Option<Rng>,
+    network_stack: Stack<'static>,
+    mqtt_stack: MqttStack<'static, CriticalSectionRawMutex>,
+    client: MqttClient<'static, CriticalSectionRawMutex>,
+    transport: MqttTlsTransport<Rng, TCP, TLS>,
 }
-
-impl<Rng: CryptoRngCore, const S: usize, const N: usize> Actor for MqttModule<Rng, S, N> {
+impl<Rng: CryptoRngCore, const S: usize, const N: usize, const NET: usize, const TCP: usize, const TLS: usize> Actor for MqttModule<Rng, S, N, NET, TCP, TLS> {
     type Handle = MqttHandle<S>;
 
     async fn act(&mut self, mut inbox: ivy_types::actor::Inbox<<Self::Handle as ivy_types::actor::ActorHandle>::Cmd>) -> ! {
-        tracing::info!("[MqttModule] Creating MQTT stack and client");
-        let (mqtt_stack, mqtt_client) = Self::create_mqtt_stack();
-        tracing::info!("[MqttModule] MQTT stack and client created");
-        let trng = self.trng.take().expect("Getting trng should never fail");
-        let transport = Self::create_transport(self.stack.clone(), trng);
-        tracing::info!("[MqttModule] Transport created");
-        let mqtt_stack_task = Self::run_stack_task(mqtt_stack, transport, self.stack.clone());
-        tracing::info!("[MqttModule] MQTT stack task created");
+        tracing::info!("[MqttModule] Starting acting");
+        let mqtt_stack_task = Self::run_stack_task(&mut self.mqtt_stack, &mut self.transport, self.network_stack.clone());
+        tracing::info!("[MqttModule] MQTT task is created");
         let topics: [SubscribeTopic<'static>; N] = core::array::from_fn(|i| {
             let (name, _handle) = self.subscribers[i];
             name.into()
         });
 
-        let client_task = self.run_client_task(&mqtt_client, &topics, &mut inbox);
+        let client_task = Self::run_client_task(&self.subscribers, &self.client, &topics, &mut inbox);
         tracing::info!("[MqttModule] Client task created");
         join(client_task, mqtt_stack_task).await.1
     }
 }
 
-impl<Rng: CryptoRngCore, const S: usize, const N: usize> MqttModule<Rng, S, N> {
+impl<Rng: CryptoRngCore, const S: usize, const N: usize, const NET: usize, const TCP: usize, const TLS: usize> MqttModule<Rng, S, N, NET, TCP, TLS> {
     const __ASSERT: () = assert!(S <= MAX_NET_PAYLOAD_SIZE);
 
-    pub fn new(stack: Stack<'static>, trng: Rng, subscribers: [(&'static str, &'static dyn ErasedHandle); N]) -> Self {
-        Self { stack, trng: Some(trng), subscribers }
-    }
-
-    fn create_mqtt_stack() -> (MqttStack<'static, CriticalSectionRawMutex>, MqttClient<'static, CriticalSectionRawMutex>) {
-        static MQTT_STATE: StaticCell<State<CriticalSectionRawMutex, MAX_NET_PAYLOAD_SIZE, MAX_NET_PAYLOAD_SIZE>> = StaticCell::new();
-        let state = MQTT_STATE.init(State::new());
+    pub fn new(
+        network_stack: Stack<'static>,
+        subscribers: [(&'static str, &'static dyn ErasedHandle); N],
+        mqtt_state: &'static mut State<CriticalSectionRawMutex, NET, NET>,
+        tls_state: &'static mut MqttTlsState<TLS>,
+        network: &'static mut MqttTcpClient<TCP>,
+        tls_config: &'static TlsConfig,
+        rng: Rng,
+    ) -> Self {
+          tracing::info!("[MqttModule] Creating MQTT module");
         let configuration = Config::builder()
             .client_id("mushclim".try_into().expect("Failed to create client id"))
             .password(option_env!("NATS_PASS").expect("Failed to get NATS_PASS").as_ref())
@@ -164,31 +165,28 @@ impl<Rng: CryptoRngCore, const S: usize, const N: usize> MqttModule<Rng, S, N> {
             .build();
         tracing::info!("[MqttModule] MQTT configuration built");
 
-        mqttrust::new(state, configuration)
-    }
-    /// Creates underlying mqtt transport directly on ram.
-    fn create_transport(network_stack: Stack<'static>, rng: Rng) -> MqttTlsTransport<Rng> {
-        static TCP_STATE: StaticCell<MqttTcpClientState> = StaticCell::new();
-        static TLS_STATE: StaticCell<MqttTlsState> = StaticCell::new();
-        static NETWORK: StaticCell<MqttTcpClient> = StaticCell::new();
-        static TLS_CONFIG: StaticCell<TlsConfig> = StaticCell::new();
-        let tcp_state = TCP_STATE.init_with(MqttTcpClientState::new);
-        let network = NETWORK.init_with(|| MqttTcpClient::new(network_stack, tcp_state));
-        let tls_state = TLS_STATE.init_with(MqttTlsState::new);
-        let tls_config = TLS_CONFIG.init_with(|| TlsConfig::new().enable_rsa_signatures());
+        let (mqtt_stack, client) = mqttrust::new(mqtt_state, configuration);
 
-        let broker = IpBroker::new(Ipv4Addr::new(217, 195, 48, 206), 1883);
         let provider = UnsecureProvider::new::<Aes128GcmSha256>(rng);
 
-        TlsNalTransport::new(network, broker, tls_state, tls_config, provider)
+        let transport = TlsNalTransport::new(network, IpBroker::new(Ipv4Addr::new(217, 195, 48, 206), 1883), tls_state, tls_config, provider);
+
+        Self {
+            subscribers,
+            mqtt_stack,
+            client,
+            transport,
+            network_stack,
+        }
     }
+
     /// Runs mqtt stack: handles wifi disconnects.
-    async fn run_stack_task(mut stack: MqttStack<'static, CriticalSectionRawMutex>, mut transport: MqttTlsTransport<Rng>, network_stack: Stack<'static>) -> ! {
+    async fn run_stack_task(stack: &mut MqttStack<'static, CriticalSectionRawMutex>, transport: &mut MqttTlsTransport<Rng, TCP, TLS>, network_stack: Stack<'static>) -> ! {
         loop {
             network_stack.wait_config_up().await;
-            stack.run(&mut transport).await;
+            stack.run(transport).await;
             Timer::after(Duration::from_millis(4000)).await;
-            stack.disconnect(&mut transport).await.ok(); // just to make sure, although after run returns it should just return an error
+            stack.disconnect(transport).await.ok(); // just to make sure, although after run returns it should just return an error
             transport.disconnect().ok(); // in case connection ended dirty
             stack.reset().await; // reset before trying to reconnect
             tracing::info!("[MqttModule] Connection lost, reconnecting...");
@@ -198,7 +196,7 @@ impl<Rng: CryptoRngCore, const S: usize, const N: usize> MqttModule<Rng, S, N> {
     /// Runs the main mqtt client task loop: waits for connection, races background workers
     /// against disconnect detection, then drains the inbox until reconnected.
     async fn run_client_task(
-        &self,
+        subscribers: &[(&'static str, &'static dyn ErasedHandle); N],
         client: &MqttClient<'static, CriticalSectionRawMutex>,
         topics: &[SubscribeTopic<'static>; N],
         inbox: &mut ivy_types::actor::Inbox<<MqttHandle<S> as ivy_types::actor::ActorHandle>::Cmd>,
@@ -209,7 +207,7 @@ impl<Rng: CryptoRngCore, const S: usize, const N: usize> MqttModule<Rng, S, N> {
             tracing::info!("[MqttModule] Connected, starting worker tasks");
             // Neither of those tasks, should ever return. Only point of failure is mqtt_client itself, if connection lost all of tasks would be cancelled anyways.
             let inbox_task = Self::handle_inbox_task(client, inbox);
-            let sub_task = self.handle_subscriptions(client, topics);
+            let sub_task = Self::handle_subscriptions(subscribers, client, topics);
             let log_task = Self::handle_log_sending(client);
             let disconnect_watch = Self::wait_for_disconnect(client);
 
@@ -260,7 +258,7 @@ impl<Rng: CryptoRngCore, const S: usize, const N: usize> MqttModule<Rng, S, N> {
         }
     }
     /// Manages subscriptions
-    async fn handle_subscriptions(&self, client: &MqttClient<'static, CriticalSectionRawMutex>, topics: &[SubscribeTopic<'static>; N]) -> ! {
+    async fn handle_subscriptions(subscribers: &[(&'static str, &'static dyn ErasedHandle); N], client: &MqttClient<'static, CriticalSectionRawMutex>, topics: &[SubscribeTopic<'static>; N]) -> ! {
         loop {
             tracing::info!("[MqttModule] Subscribing to topics");
             let mut back_off_ms = 2000;
@@ -282,7 +280,7 @@ impl<Rng: CryptoRngCore, const S: usize, const N: usize> MqttModule<Rng, S, N> {
             loop {
                 match subscription.next_message().await {
                     Some(msg) => {
-                        let handle = self.subscribers.iter().find(|(name, _)| *name == msg.topic_name());
+                        let handle = subscribers.iter().find(|(name, _)| *name == msg.topic_name());
                         let Some(handle) = handle else {
                             tracing::warn!("[MqttModule] No handle found for topic {}", msg.topic_name());
                             continue;
