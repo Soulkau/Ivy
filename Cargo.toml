@@ -13,7 +13,6 @@ exclude = [
 talky = { git = "https://github.com/Soulkau/Talky.git", tag="v0.1" }
 
 # Main
-trouble-host = "0.5.0"
 static_cell = "2.1.1"
 heapless = "0.9.2"
 log = "0.4.29"
@@ -26,9 +25,7 @@ futures-util = { version = "0.3.32", default-features = false }
 pin-project = "1.1.11"
 serde_json = { version = "1.0.149", default-features = false, features = ["alloc"] }
 serde-json-core = "0.6.0"
-enum_dispatch = {version ="0.3.13"}
 const_panic = "0.2.15"
-bbqueue = "0.7.0"
 mqttrust = { git = "https://github.com/Soulkau/mqttrust.git", features = ["log", "embedded-tls", "mqttv3"], default-features=false  }
 tracing = {version = "0.1.44", default-features = false }
 thiserror = { version = "2.0.18", default-features = false }
@@ -40,7 +37,6 @@ embedded-time = "0.12.1"
 embedded-storage = "0.3.1"
 embedded-storage-async = "0.4.1"
 embedded-tls = { git = "https://github.com/drogue-iot/embedded-tls", rev = "426f327", default-features = false }
-bt-hci = "0.6.0"
 #Embassy
 embassy-net = { version = "0.9.1", features = ["dhcpv4", "medium-ethernet", "tcp", "udp", "dns", "dhcpv4"] }
 embassy-executor = { version = "0.10.0", features = [] }

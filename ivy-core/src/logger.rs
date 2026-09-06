@@ -1,9 +1,6 @@
 use core::sync::atomic::{AtomicU32, Ordering};
 
-use embassy_sync::{
-    blocking_mutex::raw::{CriticalSectionRawMutex, NoopRawMutex},
-    channel::Channel,
-};
+use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, channel::Channel};
 use talky::logs::{BufVisitor, DeviceLog, LogLevel};
 use tracing::{Dispatch, Level, Subscriber, span};
 
