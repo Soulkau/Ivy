@@ -120,21 +120,21 @@ impl<const MAX_MESSAGE_SIZE: usize> MqttHandle<MAX_MESSAGE_SIZE> {
     }
 }
 
-pub struct MqttModule<Rng: CryptoRngCore + 'static, const S: usize, const N: usize, const NET: usize = 4096, const TCP: usize = 4096, const TLS: usize = 16640> {
-    subscribers: [(&'static str, &'static dyn ErasedHandle); N],
+pub struct MqttModule<Rng: CryptoRngCore + 'static, const H: usize, const S: usize, const NET: usize = 4096, const TCP: usize = 4096, const TLS: usize = 16640> {
+    subscribers: [(&'static str, &'static dyn ErasedHandle); S],
     network_stack: Stack<'static>,
     mqtt_stack: MqttStack<'static, CriticalSectionRawMutex>,
     client: MqttClient<'static, CriticalSectionRawMutex>,
     transport: MqttTlsTransport<Rng, TCP, TLS>,
 }
-impl<Rng: CryptoRngCore, const S: usize, const N: usize, const NET: usize, const TCP: usize, const TLS: usize> Actor for MqttModule<Rng, S, N, NET, TCP, TLS> {
-    type Handle = MqttHandle<S>;
+impl<Rng: CryptoRngCore, const H: usize, const S: usize, const NET: usize, const TCP: usize, const TLS: usize> Actor for MqttModule<Rng, H, S, NET, TCP, TLS> {
+    type Handle = MqttHandle<H>;
 
     async fn act(&mut self, mut inbox: ivy_types::actor::Inbox<<Self::Handle as ivy_types::actor::ActorHandle>::Cmd>) -> ! {
         tracing::info!("[MqttModule] Starting acting");
         let mqtt_stack_task = Self::run_stack_task(&mut self.mqtt_stack, &mut self.transport, self.network_stack.clone());
         tracing::info!("[MqttModule] MQTT task is created");
-        let topics: [SubscribeTopic<'static>; N] = core::array::from_fn(|i| {
+        let topics: [SubscribeTopic<'static>; S] = core::array::from_fn(|i| {
             let (name, _handle) = self.subscribers[i];
             name.into()
         });
@@ -149,6 +149,7 @@ impl<Rng: CryptoRngCore, const S: usize, const N: usize, const NET: usize, const
     const __ASSERT: () = assert!(S <= MAX_NET_PAYLOAD_SIZE);
 
     pub fn new(
+        client_id: &'static str,
         network_stack: Stack<'static>,
         subscribers: [(&'static str, &'static dyn ErasedHandle); N],
         mqtt_state: &'static mut State<CriticalSectionRawMutex, NET, NET>,
@@ -157,9 +158,10 @@ impl<Rng: CryptoRngCore, const S: usize, const N: usize, const NET: usize, const
         tls_config: &'static TlsConfig,
         rng: Rng,
     ) -> Self {
-          tracing::info!("[MqttModule] Creating MQTT module");
+        tracing::info!("[MqttModule] Creating MQTT module");
+
         let configuration = Config::builder()
-            .client_id("mushclim".try_into().expect("Failed to create client id"))
+            .client_id(client_id.try_into().expect("Failed to create client id"))
             .password(option_env!("NATS_PASS").expect("Failed to get NATS_PASS").as_ref())
             .username(option_env!("NATS_USER").expect("Failed to get NATS_USER").as_ref())
             .build();
