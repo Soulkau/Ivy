@@ -34,7 +34,7 @@ tracing = {version = "0.1.44", default-features = false }
 thiserror = { version = "2.0.18", default-features = false }
 
 #Embedded abtractions
-embedded-io = "0.7.1"
+embedded-io = "0.7.0"
 embedded-io-async = "0.7.0"
 embedded-time = "0.12.1"
 embedded-storage = "0.3.1"
