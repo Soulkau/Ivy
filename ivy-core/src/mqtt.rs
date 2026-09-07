@@ -106,17 +106,17 @@ pub trait MqttHandle<const MAX_MESSAGE_SIZE: usize> {
 }
 
 impl<const MAX_MESSAGE_SIZE: usize> MqttHandle<MAX_MESSAGE_SIZE> {
-    pub async fn publish<S: Serialize>(&self, topic: &'static str, data: S) {
+    pub async fn publish<S: Serialize>(&self, topic: &'static str, data: S) -> Result<(), MqttError> {
         let mut buffer = [0u8; MAX_MESSAGE_SIZE];
         let payload = match serde_json_core::to_slice(&data, &mut buffer) {
             Ok(payload) => payload,
-            Err(_) => {
-                tracing::info!("[MqttHandle] failed to serialize data for publish");
-                return;
+            Err(e) => {
+                tracing::debug!("[MqttHandle] failed to serialize data for publish {}", e);
+                return Err(MqttError::Encode(e));
             }
         };
-        tracing::info!("[MqttHandle] Publishing");
-        self.__publish(topic, buffer, payload).await.ok();
+        tracing::debug!("[MqttHandle] Publishing");
+        self.__publish(topic, buffer, payload).await
     }
 }
 
