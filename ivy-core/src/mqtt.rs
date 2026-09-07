@@ -21,19 +21,10 @@ use mqttrust::{
     },
 };
 use serde::{Serialize, de::DeserializeOwned};
-use static_cell::StaticCell;
 
 pub use mqttrust::State as MqttState;
 
 use crate::logger::LOG_CHANNEL;
-
-const MAX_NET_PAYLOAD_SIZE: usize = 4096;
-
-const TCP_BUFFER_SIZE: usize = 4096;
-
-const TLS_BUFFER_SIZE: usize = 16640;
-
-const _: () = assert!(MAX_NET_PAYLOAD_SIZE + 500 <= TLS_BUFFER_SIZE);
 
 pub type MqttTcpClientState<const TCP: usize> = TcpClientState<1, TCP, TCP>;
 pub type MqttTcpClient<const TCP: usize> = TcpClient<'static, 1, TCP, TCP>;
@@ -145,8 +136,8 @@ impl<Rng: CryptoRngCore, const H: usize, const S: usize, const NET: usize, const
     }
 }
 
-impl<Rng: CryptoRngCore, const S: usize, const N: usize, const NET: usize, const TCP: usize, const TLS: usize> MqttModule<Rng, S, N, NET, TCP, TLS> {
-    const __ASSERT: () = assert!(S <= MAX_NET_PAYLOAD_SIZE);
+impl<Rng: CryptoRngCore, const H: usize, const N: usize, const NET: usize, const TCP: usize, const TLS: usize> MqttModule<Rng, H, N, NET, TCP, TLS> {
+    const __ASSERT: () = assert!(H <= NET);
 
     pub fn new(
         client_id: &'static str,
@@ -201,7 +192,7 @@ impl<Rng: CryptoRngCore, const S: usize, const N: usize, const NET: usize, const
         subscribers: &[(&'static str, &'static dyn ErasedHandle); N],
         client: &MqttClient<'static, CriticalSectionRawMutex>,
         topics: &[SubscribeTopic<'static>; N],
-        inbox: &mut ivy_types::actor::Inbox<<MqttHandle<S> as ivy_types::actor::ActorHandle>::Cmd>,
+        inbox: &mut ivy_types::actor::Inbox<<MqttHandle<H> as ivy_types::actor::ActorHandle>::Cmd>,
     ) -> ! {
         loop {
             // don't spin the workers up until we're actually connected
@@ -230,7 +221,7 @@ impl<Rng: CryptoRngCore, const S: usize, const N: usize, const NET: usize, const
         }
     }
     /// Drains inbox, so that it won't overflow with uncompleted publish requests.
-    async fn drain_inbox_task(inbox: &mut ivy_types::actor::Inbox<<MqttHandle<S> as ivy_types::actor::ActorHandle>::Cmd>) -> ! {
+    async fn drain_inbox_task(inbox: &mut ivy_types::actor::Inbox<<MqttHandle<H> as ivy_types::actor::ActorHandle>::Cmd>) -> ! {
         loop {
             match inbox.next().await {
                 MqttHandleCommand::Publish(c, _, _, _) => {
@@ -241,7 +232,7 @@ impl<Rng: CryptoRngCore, const S: usize, const N: usize, const NET: usize, const
         }
     }
     /// Handles inbox commands
-    async fn handle_inbox_task(client: &MqttClient<'static, CriticalSectionRawMutex>, inbox: &mut ivy_types::actor::Inbox<<MqttHandle<S> as ivy_types::actor::ActorHandle>::Cmd>) {
+    async fn handle_inbox_task(client: &MqttClient<'static, CriticalSectionRawMutex>, inbox: &mut ivy_types::actor::Inbox<<MqttHandle<H> as ivy_types::actor::ActorHandle>::Cmd>) {
         loop {
             match inbox.next().await {
                 MqttHandleCommand::Publish(c, topic, payload, len) => {
