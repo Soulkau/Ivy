@@ -153,6 +153,18 @@ impl<Rng: CryptoRngCore, const H: usize, const N: usize, const NET: usize, const
 
         let configuration = Config::builder()
             .client_id(client_id.try_into().expect("Failed to create client id"))
+            .connect_timeout(Duration::from_secs(20))
+            // Default MQTT backoff algo, but capped at 7 attempts (~1 min total sleep) before failing
+            .backoff_algo(|attempt| {
+                let max_attempts = 7;
+                if attempt >= max_attempts {
+                    return None;
+                }
+                let base_time_ms: u32 = 500;
+                let backoff = base_time_ms.saturating_mul(u32::pow(2, attempt as u32));
+
+                Some(Duration::from_millis(backoff.into()))
+            })
             .password(option_env!("NATS_PASS").expect("Failed to get NATS_PASS").as_ref())
             .username(option_env!("NATS_USER").expect("Failed to get NATS_USER").as_ref())
             .build();
@@ -174,14 +186,14 @@ impl<Rng: CryptoRngCore, const H: usize, const N: usize, const NET: usize, const
     }
 
     /// Runs mqtt stack: handles wifi disconnects.
-    async fn run_stack_task(stack: &mut MqttStack<'static, CriticalSectionRawMutex>, transport: &mut MqttTlsTransport<Rng, TCP, TLS>, network_stack: Stack<'static>) -> ! {
+    async fn run_stack_task(mqtt_stack: &mut MqttStack<'static, CriticalSectionRawMutex>, transport: &mut MqttTlsTransport<Rng, TCP, TLS>, network_stack: Stack<'static>) -> ! {
         loop {
             network_stack.wait_config_up().await;
-            stack.run(transport).await;
+            mqtt_stack.run(transport).await;
             Timer::after(Duration::from_millis(4000)).await;
-            stack.disconnect(transport).await.ok(); // just to make sure, although after run returns it should just return an error
-            transport.disconnect().ok(); // in case connection ended dirty
-            stack.reset().await; // reset before trying to reconnect
+            // All following is done internally in run of mqtt_stack, but just to make sure
+            mqtt_stack.disconnect(transport).await.ok();
+            mqtt_stack.reset().await;
             tracing::info!("[MqttModule] Connection lost, reconnecting...");
         }
     }
