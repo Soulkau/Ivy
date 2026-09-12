@@ -15,10 +15,7 @@ use ivy_macros::actor_handle;
 use ivy_types::actor::Actor;
 use mqttrust::{
     Config, IpBroker, MqttClient, MqttStack, Publish, State, Subscribe, SubscribeTopic,
-    transport::{
-        Transport,
-        embedded_tls::{TlsNalTransport, TlsState},
-    },
+    transport::embedded_tls::{TlsNalTransport, TlsState},
 };
 use serde::{Serialize, de::DeserializeOwned};
 
@@ -117,6 +114,7 @@ pub struct MqttModule<Rng: CryptoRngCore + 'static, const H: usize, const S: usi
     mqtt_stack: MqttStack<'static, CriticalSectionRawMutex>,
     client: MqttClient<'static, CriticalSectionRawMutex>,
     transport: MqttTlsTransport<Rng, TCP, TLS>,
+    log_topic: &'static str,
 }
 impl<Rng: CryptoRngCore, const H: usize, const S: usize, const NET: usize, const TCP: usize, const TLS: usize> Actor for MqttModule<Rng, H, S, NET, TCP, TLS> {
     type Handle = MqttHandle<H>;
@@ -130,7 +128,7 @@ impl<Rng: CryptoRngCore, const H: usize, const S: usize, const NET: usize, const
             name.into()
         });
 
-        let client_task = Self::run_client_task(&self.subscribers, &self.client, &topics, &mut inbox);
+        let client_task = Self::run_client_task(self.log_topic, &self.subscribers, &self.client, &topics, &mut inbox);
         tracing::info!("[MqttModule] Client task created");
         join(client_task, mqtt_stack_task).await.1
     }
@@ -141,6 +139,7 @@ impl<Rng: CryptoRngCore, const H: usize, const N: usize, const NET: usize, const
 
     pub fn new(
         client_id: &'static str,
+        log_topic: &'static str,
         network_stack: Stack<'static>,
         subscribers: [(&'static str, &'static dyn ErasedHandle); N],
         mqtt_state: &'static mut State<CriticalSectionRawMutex, NET, NET>,
@@ -177,6 +176,7 @@ impl<Rng: CryptoRngCore, const H: usize, const N: usize, const NET: usize, const
         let transport = TlsNalTransport::new(network, IpBroker::new(Ipv4Addr::new(217, 195, 48, 206), 1883), tls_state, tls_config, provider);
 
         Self {
+            log_topic,
             subscribers,
             mqtt_stack,
             client,
@@ -201,6 +201,7 @@ impl<Rng: CryptoRngCore, const H: usize, const N: usize, const NET: usize, const
     /// Runs the main mqtt client task loop: waits for connection, races background workers
     /// against disconnect detection, then drains the inbox until reconnected.
     async fn run_client_task(
+        log_topic: &'static str,
         subscribers: &[(&'static str, &'static dyn ErasedHandle); N],
         client: &MqttClient<'static, CriticalSectionRawMutex>,
         topics: &[SubscribeTopic<'static>; N],
@@ -213,7 +214,7 @@ impl<Rng: CryptoRngCore, const H: usize, const N: usize, const NET: usize, const
             // Neither of those tasks, should ever return. Only point of failure is mqtt_client itself, if connection lost all of tasks would be cancelled anyways.
             let inbox_task = Self::handle_inbox_task(client, inbox);
             let sub_task = Self::handle_subscriptions(subscribers, client, topics);
-            let log_task = Self::handle_log_sending(client);
+            let log_task = Self::handle_log_sending(client, log_topic);
             let disconnect_watch = Self::wait_for_disconnect(client);
 
             // Neither of those futures, besides disconnect_watch ever returns.
@@ -239,7 +240,6 @@ impl<Rng: CryptoRngCore, const H: usize, const N: usize, const NET: usize, const
                 MqttHandleCommand::Publish(c, _, _, _) => {
                     c.ack_err(MqttError::Disconnected).await;
                 }
-                _ => {}
             }
         }
     }
@@ -258,7 +258,6 @@ impl<Rng: CryptoRngCore, const H: usize, const N: usize, const NET: usize, const
                         }
                     }
                 }
-                _ => {}
             }
         }
     }
@@ -302,7 +301,7 @@ impl<Rng: CryptoRngCore, const H: usize, const N: usize, const NET: usize, const
         }
     }
     /// Handles log sending
-    async fn handle_log_sending(client: &MqttClient<'static, CriticalSectionRawMutex>) -> ! {
+    async fn handle_log_sending(client: &MqttClient<'static, CriticalSectionRawMutex>, log_topic: &'static str) -> ! {
         let mut work_buf = [0u8; 1024];
         loop {
             let log = LOG_CHANNEL.receive().await;
@@ -310,7 +309,7 @@ impl<Rng: CryptoRngCore, const H: usize, const N: usize, const NET: usize, const
                 continue;
             };
             client
-                .publish(Publish::builder().topic_name("mushclim/log").payload(&work_buf[..serialized]).qos(mqttrust::QoS::AtMostOnce).build())
+                .publish(Publish::builder().topic_name(log_topic).payload(&work_buf[..serialized]).qos(mqttrust::QoS::AtMostOnce).build())
                 .await
                 .ok();
         }
