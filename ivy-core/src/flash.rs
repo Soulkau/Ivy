@@ -87,7 +87,7 @@ macro_rules! init_flash {
         static CELL: static_cell::StaticCell<embassy_sync::blocking_mutex::Mutex<embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex, core::cell::RefCell<$flash_ty>>> =
             static_cell::StaticCell::new();
         let flash_ref = CELL.init_with(|| embassy_sync::blocking_mutex::Mutex::new(core::cell::RefCell::new($flash)));
-        $crate::storage::IvyFlash::<$flash_ty>::new(flash_ref)
+        $crate::flash::IvyFlash::<$flash_ty>::new(flash_ref)
     }};
 }
 
@@ -137,9 +137,9 @@ impl<F: NorFlash> FlashStorage<F> {
 #[macro_export]
 macro_rules! init_storage {
     ($flash_ty:ty, $partition:expr) => {{
-        static CELL: static_cell::StaticCell<$crate::storage::Inner<$flash_ty>> = static_cell::StaticCell::new();
-        let storage_ref = CELL.init_with(|| $crate::storage::StorageModule::<$flash_ty>::build($partition));
-        $crate::storage::StorageModule::from_static(storage_ref)
+        static CELL: static_cell::StaticCell<$crate::flash::Inner<$flash_ty>> = static_cell::StaticCell::new();
+        let storage_ref = CELL.init_with(|| $crate::flash::FlashStorage::<$flash_ty>::build($partition));
+        $crate::flash::FlashStorage::from_static(storage_ref)
     }};
 }
 
