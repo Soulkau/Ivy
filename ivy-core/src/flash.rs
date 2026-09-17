@@ -12,6 +12,8 @@ use serde::{Deserialize, Serialize};
 
 type SynchronizedFlash<F> = BlockingMutex<CriticalSectionRawMutex, RefCell<F>>;
 
+/// Holds synchronized flash, used to create partitions.
+/// All partitions share the same physical flash and are access-serialized.
 pub struct IvyFlash<F: NorFlash + 'static> {
     flash: &'static SynchronizedFlash<F>,
 }
@@ -20,12 +22,14 @@ impl<F: NorFlash> IvyFlash<F> {
     pub fn new(flash: &'static SynchronizedFlash<F>) -> Self {
         Self { flash }
     }
-
+    /// Creates new partition
     pub fn partition(&self, range: Range<u32>) -> IvyFlashPartition<F> {
         IvyFlashPartition::new(self.flash, range)
     }
 }
 
+/// A region of flash defined by `range`, addressed relative to itself (0..size),
+/// not the chip's absolute position. Bounds are NOT checked.
 pub struct IvyFlashPartition<F: NorFlash + 'static> {
     flash: &'static SynchronizedFlash<F>,
     range: Range<u32>, // start = offset, end = offset + size
@@ -35,11 +39,11 @@ impl<F: NorFlash> IvyFlashPartition<F> {
     pub const fn new(flash: &'static SynchronizedFlash<F>, range: Range<u32>) -> Self {
         Self { flash, range }
     }
-
+    /// Start offest of partition relative to flash
     fn offset(&self) -> u32 {
         self.range.start
     }
-
+    /// Parition size in butes
     fn size(&self) -> u32 {
         self.range.end - self.range.start
     }
