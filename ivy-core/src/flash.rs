@@ -95,11 +95,11 @@ pub struct StorageInner<F: NorFlash + 'static> {
 
 pub type Inner<F> = AsyncMutex<CriticalSectionRawMutex, StorageInner<F>>;
 
-pub struct StorageModule<F: NorFlash + 'static> {
+pub struct FlashStorage<F: NorFlash + 'static> {
     pub inner: &'static Inner<F>,
 }
 
-impl<F: NorFlash> StorageModule<F> {
+impl<F: NorFlash> FlashStorage<F> {
     #[doc(hidden)]
     pub fn build(partition: IvyFlashPartition<F>) -> Inner<F> {
         let map_config = MapConfig::new(0..partition.size()); // relative, not absolute

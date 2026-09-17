@@ -3,6 +3,7 @@
 #![allow(incomplete_features)]
 
 pub mod device;
+pub mod flash;
 pub mod logger;
 pub mod mqtt;
 pub mod storage;
