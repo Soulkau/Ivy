@@ -1,4 +1,4 @@
-use core::range::RangeInclusive;
+use core::{cell::RefCell, ops::Range};
 
 use const_panic::concat_panic;
 use embassy_embedded_hal::adapter::BlockingAsync;
@@ -93,7 +93,7 @@ pub struct StorageInner<F: NorFlash + 'static> {
     work_buf: [u8; 256],
 }
 
-pub type Inner<F> = Mutex<CriticalSectionRawMutex, StorageInner<F>>;
+pub type Inner<F> = AsyncMutex<CriticalSectionRawMutex, StorageInner<F>>;
 
 pub struct StorageModule<F: NorFlash + 'static> {
     pub inner: &'static Inner<F>,
@@ -101,9 +101,10 @@ pub struct StorageModule<F: NorFlash + 'static> {
 
 impl<F: NorFlash> StorageModule<F> {
     #[doc(hidden)]
-    pub fn build(flash: F, map_config: MapConfig<BlockingAsync<F>>) -> Inner<F> {
-        Mutex::new(StorageInner {
-            storage: MapStorage::new(BlockingAsync::new(flash), map_config, NoCache::new()),
+    pub fn build(partition: IvyFlashPartition<F>) -> Inner<F> {
+        let map_config = MapConfig::new(0..partition.size()); // relative, not absolute
+        AsyncMutex::new(StorageInner {
+            storage: MapStorage::new(BlockingAsync::new(partition), map_config, NoCache::new()),
             ser_buf: [0u8; 256],
             work_buf: [0u8; 256],
         })
@@ -115,18 +116,15 @@ impl<F: NorFlash> StorageModule<F> {
 
     pub async fn get<D: for<'de> Deserialize<'de>>(&self, key: StorageKey) -> Option<D> {
         let mut guard = self.inner.lock().await;
-        let inner = &mut *guard; // reborrow to satisfy borrow checker
+        let inner = &mut *guard;
         let item_data = inner.storage.fetch_item(&mut inner.ser_buf, key.as_ref()).await.ok()??;
-
         let data: D = postcard::from_bytes(item_data).ok()?;
-
         Some(data)
     }
 
     pub async fn set<S: Serialize>(&self, key: StorageKey, value: &S) {
         let mut guard = self.inner.lock().await;
-        let inner = &mut *guard; // reborrow to satisfy borrow checker
-
+        let inner = &mut *guard;
         let serialized: &[u8] = postcard::to_slice(value, &mut inner.ser_buf).unwrap();
         let _ = inner.storage.store_item(&mut inner.work_buf, &key.as_ref(), &serialized).await;
     }
@@ -134,9 +132,9 @@ impl<F: NorFlash> StorageModule<F> {
 
 #[macro_export]
 macro_rules! init_storage {
-    ($flash_ty:ty, $flash:expr, $map_config:expr) => {{
+    ($flash_ty:ty, $partition:expr) => {{
         static CELL: static_cell::StaticCell<$crate::storage::Inner<$flash_ty>> = static_cell::StaticCell::new();
-        let storage_ref = CELL.init_with(|| $crate::storage::StorageModule::<$flash_ty>::build($flash, $map_config));
+        let storage_ref = CELL.init_with(|| $crate::storage::StorageModule::<$flash_ty>::build($partition));
         $crate::storage::StorageModule::from_static(storage_ref)
     }};
 }
@@ -151,10 +149,6 @@ impl StorageKey {
             concat_panic!("This ket is reserved for system use: ", key);
         }
         Self(key)
-    }
-
-    pub(crate) const fn wifi_key() -> Self {
-        Self(0)
     }
 
     pub(crate) const fn metadata_key() -> Self {
