@@ -173,7 +173,7 @@ impl<Rng: CryptoRngCore, const H: usize, const N: usize, const NET: usize, const
 
         let provider = UnsecureProvider::new::<Aes128GcmSha256>(rng);
 
-        let transport = TlsNalTransport::new(network, IpBroker::new(Ipv4Addr::new(217, 195, 48, 206), 1883), tls_state, tls_config, provider);
+        let transport = TlsNalTransport::new(network, IpBroker::new(Ipv4Addr::new(198, 168, 88, 250), 1883), tls_state, tls_config, provider);
 
         Self {
             log_topic,
