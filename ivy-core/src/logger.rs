@@ -2,7 +2,7 @@ use core::fmt::Write;
 use core::sync::atomic::{AtomicU32, Ordering};
 
 use embassy_sync::blocking_mutex::raw::{CriticalSectionRawMutex, RawMutex};
-use embassy_sync::channel::{Channel, Sender};
+use embassy_sync::channel::{Channel, Receiver, Sender};
 use heapless::String;
 use static_cell::StaticCell;
 use talky::logs::{DeviceLog, LogLevel};
@@ -12,29 +12,30 @@ use tracing::{
     span,
 };
 
-const DEFAULT_LOG_SIZE: usize = 512;
+pub const LOG_SIZE: usize = 512;
+pub const TAG_SIZE: usize = 16;
+pub const LOG_QUEUE_SIZE: usize = 16;
 
-const DEFAULT_TAG_SIZE: usize = 16;
+pub type Log = DeviceLog<LOG_SIZE, TAG_SIZE>;
 
-const DEFAULT_LOG_QUEUE_SIZE: usize = 16;
+pub type LogSink = Receiver<'static, CriticalSectionRawMutex, Log, LOG_QUEUE_SIZE>;
 
-type DefaultLog = DeviceLog<DEFAULT_LOG_SIZE, DEFAULT_TAG_SIZE>;
-
-pub trait LogEmitter<const S: usize, const T: usize>: Sync + Send {
-    fn send(&self, device_log: DeviceLog<S, T>);
+pub trait LogEmitter: Sync + Send {
+    fn send(&self, device_log: Log);
 }
 
-pub trait LogSink<const S: usize, const T: usize> {
-    async fn next(&self) -> DeviceLog<S, T>;
+#[allow(async_fn_in_trait)]
+pub trait LogConsumer {
+    async fn consume_logs(&mut self, sink: LogSink) -> !;
 }
 
-pub struct Logger<const S: usize, const T: usize, E: LogEmitter<S, T>> {
+pub struct Logger<E: LogEmitter> {
     max_level: Level,
     next_id: AtomicU32,
     emitter: E,
 }
 
-impl<const S: usize, const T: usize, E: LogEmitter<S, T>> Logger<S, T, E> {
+impl<E: LogEmitter> Logger<E> {
     pub fn new(max_level: Level, emitter: E) -> Self {
         Self {
             max_level,
@@ -44,7 +45,7 @@ impl<const S: usize, const T: usize, E: LogEmitter<S, T>> Logger<S, T, E> {
     }
 }
 
-impl<const S: usize, const T: usize, E: LogEmitter<S, T> + 'static> Subscriber for Logger<S, T, E> {
+impl<E: LogEmitter + 'static> Subscriber for Logger<E> {
     fn enabled(&self, metadata: &tracing::Metadata<'_>) -> bool {
         metadata.level() <= &self.max_level
     }
@@ -57,30 +58,27 @@ impl<const S: usize, const T: usize, E: LogEmitter<S, T> + 'static> Subscriber f
         self.emitter.send(log);
     }
 
-    fn new_span(&self, span: &span::Attributes<'_>) -> span::Id {
+    fn new_span(&self, _: &span::Attributes<'_>) -> span::Id {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         span::Id::from_u64(id as u64)
     }
 
-    fn record(&self, span: &span::Id, values: &span::Record<'_>) {}
-
-    fn exit(&self, span: &span::Id) {}
-
-    fn enter(&self, span: &span::Id) {}
-
-    fn record_follows_from(&self, span: &span::Id, follows: &span::Id) {}
+    fn record(&self, _: &span::Id, _: &span::Record<'_>) {}
+    fn exit(&self, _: &span::Id) {}
+    fn enter(&self, _: &span::Id) {}
+    fn record_follows_from(&self, _: &span::Id, _: &span::Id) {}
 }
 
-pub struct BufVisitor<const S: usize, const T: usize> {
-    pub buf: String<S>,
-    pub tag: String<T>,
+pub struct BufVisitor {
+    pub buf: String<LOG_SIZE>,
+    pub tag: String<TAG_SIZE>,
 }
 
-impl<const S: usize, const T: usize> BufVisitor<S, T> {
+impl BufVisitor {
     pub fn new() -> Self {
         Self {
             buf: String::new(),
-            tag: String::new(),
+            tag: "notag".try_into().unwrap(),
         }
     }
 
@@ -91,7 +89,7 @@ impl<const S: usize, const T: usize> BufVisitor<S, T> {
     }
 }
 
-impl<const S: usize, const T: usize> Visit for BufVisitor<S, T> {
+impl Visit for BufVisitor {
     fn record_debug(&mut self, field: &Field, value: &dyn core::fmt::Debug) {
         if field.name() == "message" {
             self.write(format_args!("{:?}", value));
@@ -125,25 +123,31 @@ impl<const S: usize, const T: usize> Visit for BufVisitor<S, T> {
     }
 }
 
-impl<'a, const S: usize, const T: usize, M: RawMutex + Sync, const Q: usize> LogEmitter<S, T> for Sender<'a, M, DeviceLog<S, T>, Q> {
-    fn send(&self, device_log: DeviceLog<S, T>) {
-        self.try_send(device_log);
+impl<'a, M: RawMutex + Sync, const Q: usize> LogEmitter for Sender<'a, M, Log, Q> {
+    fn send(&self, device_log: Log) {
+        self.try_send(device_log).ok();
     }
 }
 
-impl<const S: usize, const T: usize, M: RawMutex + Sync, const Q: usize> LogSink<S, T> for Channel<M, DeviceLog<S, T>, Q> {
-    async fn next(&self) -> DeviceLog<S, T> {
-        self.receive().await
-    }
-}
-
-fn register_dispatcher<E: LogEmitter<S, T> + 'static, const S: usize, const T: usize>(level: Level, sink: E) {
+fn register_dispatcher<E: LogEmitter + 'static>(level: Level, sink: E) {
     tracing::dispatcher::set_global_default(Dispatch::new(Logger::new(level, sink))).unwrap();
 }
 
-pub fn init_default_logger(level: Level) -> &'static Channel<CriticalSectionRawMutex, DefaultLog, DEFAULT_LOG_QUEUE_SIZE> {
-    static CHANNEL: StaticCell<Channel<CriticalSectionRawMutex, DefaultLog, DEFAULT_LOG_QUEUE_SIZE>> = StaticCell::new();
+pub fn init_subscriber(level: Level) -> LogSink {
+    static CHANNEL: StaticCell<Channel<CriticalSectionRawMutex, Log, LOG_QUEUE_SIZE>> = StaticCell::new();
     let channel = &*CHANNEL.init_with(|| Channel::new());
     register_dispatcher(level, channel.sender());
-    channel
+    channel.receiver()
+}
+
+#[macro_export]
+macro_rules! init_logger {
+    ($spawner:expr, $consumer:expr, $sink:expr, $consumer_ty:ty) => {{
+        #[embassy_executor::task]
+        async fn ___logger_task(mut consumer: $consumer_ty, sink: $crate::logger::LogSink) -> ! {
+            use $crate::logger::LogConsumer;
+            consumer.consume_logs(sink).await
+        }
+        $spawner.spawn(___logger_task($consumer, $sink).unwrap());
+    }};
 }
