@@ -2,7 +2,7 @@ use core::net::Ipv4Addr;
 
 use embassy_futures::{
     join::join,
-    select::{select, select4},
+    select::{select, select3, select4},
 };
 use embassy_net::{
     Stack,
@@ -12,7 +12,7 @@ use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, signal::Signal}
 use embassy_time::{Duration, Timer};
 use embedded_tls::{Aes128GcmSha256, CryptoRngCore, TlsConfig, UnsecureProvider};
 use ivy_macros::actor_handle;
-use ivy_types::actor::Actor;
+use ivy_types::actor::{Actor, rt::launder_slice};
 use mqttrust::{
     Config, IpBroker, MqttClient, MqttStack, Publish, State, Subscribe, SubscribeTopic,
     transport::embedded_tls::{TlsNalTransport, TlsState},
@@ -21,7 +21,7 @@ use serde::{Serialize, de::DeserializeOwned};
 
 pub use mqttrust::State as MqttState;
 
-use crate::logger::LOG_CHANNEL;
+use crate::logger::{LOG_SIZE, LogConsumer, LogSink, TAG_SIZE};
 
 pub type MqttTcpClientState<const TCP: usize> = TcpClientState<1, TCP, TCP>;
 pub type MqttTcpClient<const TCP: usize> = TcpClient<'static, 1, TCP, TCP>;
@@ -88,36 +88,59 @@ where
     }
 }
 
-#[actor_handle(MqttHandle)]
-pub trait MqttHandle<const MAX_MESSAGE_SIZE: usize> {
-    async fn __publish(&self, topic: &'static str, payload: [u8; MAX_MESSAGE_SIZE], len: usize) -> Result<(), MqttError>;
+#[actor_handle(RawMqttHandle)]
+pub trait MqttHandle {
+    async fn __publish(&self, topic: &'static str, payload: &'static [u8]) -> Result<(), MqttError>;
 }
 
-impl<const MAX_MESSAGE_SIZE: usize> MqttHandle<MAX_MESSAGE_SIZE> {
-    pub async fn publish<S: Serialize>(&self, topic: &'static str, data: S) -> Result<(), MqttError> {
-        let mut buffer = [0u8; MAX_MESSAGE_SIZE];
-        let payload = match serde_json_core::to_slice(&data, &mut buffer) {
-            Ok(payload) => payload,
-            Err(e) => {
-                tracing::debug!("[MqttHandle] failed to serialize data for publish {}", e);
-                return Err(MqttError::Encode(e));
-            }
-        };
-        tracing::debug!("[MqttHandle] Publishing");
-        self.__publish(topic, buffer, payload).await
+impl RawMqttHandle {
+    /// # Safety
+    /// `payload` must stay valid until the actor finishes reading it (before it replies) -
+    ///  this function (as all other actor_handle generated functions) are cancel-unsafe,
+    ///  using anything that will drop future before its compeletion will result in panic.
+    async unsafe fn publish(&self, topic: &'static str, payload: &[u8]) -> Result<(), MqttError> {
+        self.__publish(topic, unsafe { launder_slice(payload) }).await
     }
 }
 
-pub struct MqttModule<Rng: CryptoRngCore + 'static, const H: usize, const S: usize, const NET: usize = 4096, const TCP: usize = 4096, const TLS: usize = 16640> {
+impl<const S: usize> From<RawMqttHandle> for SizedMqttHandle<S> {
+    fn from(raw: RawMqttHandle) -> Self {
+        Self { raw }
+    }
+}
+
+pub struct SizedMqttHandle<const B: usize> {
+    raw: RawMqttHandle,
+}
+
+impl<const B: usize> SizedMqttHandle<B> {
+    pub fn as_raw(&self) -> RawMqttHandle {
+        self.raw.clone()
+    }
+
+    pub async fn publish<S: Serialize>(&self, topic: &'static str, data: S) -> Result<(), MqttError> {
+        let mut buffer = [0u8; B];
+        let payload = match serde_json_core::to_slice(&data, &mut buffer) {
+            Ok(payload) => payload,
+            Err(e) => {
+                return Err(MqttError::Encode(e));
+            }
+        };
+        /*  SAFETY: `buffer` outlives the request - it's not touched again until this
+        await resolves, satisfying `publish`'s read-before-reply requirement. */
+        unsafe { self.raw.publish(topic, launder_slice(&buffer[..payload])).await }
+    }
+}
+
+pub struct MqttModule<Rng: CryptoRngCore + 'static, const S: usize, const NET: usize = 4096, const TCP: usize = 4096, const TLS: usize = 16640> {
     subscribers: [(&'static str, &'static dyn ErasedHandle); S],
     network_stack: Stack<'static>,
     mqtt_stack: MqttStack<'static, CriticalSectionRawMutex>,
     client: MqttClient<'static, CriticalSectionRawMutex>,
     transport: MqttTlsTransport<Rng, TCP, TLS>,
-    log_topic: &'static str,
 }
-impl<Rng: CryptoRngCore, const H: usize, const S: usize, const NET: usize, const TCP: usize, const TLS: usize> Actor for MqttModule<Rng, H, S, NET, TCP, TLS> {
-    type Handle = MqttHandle<H>;
+impl<Rng: CryptoRngCore, const S: usize, const NET: usize, const TCP: usize, const TLS: usize> Actor for MqttModule<Rng, S, NET, TCP, TLS> {
+    type Handle = RawMqttHandle;
 
     async fn act(&mut self, mut inbox: ivy_types::actor::Inbox<<Self::Handle as ivy_types::actor::ActorHandle>::Cmd>) -> ! {
         tracing::info!("[MqttModule] Starting acting");
@@ -128,18 +151,15 @@ impl<Rng: CryptoRngCore, const H: usize, const S: usize, const NET: usize, const
             name.into()
         });
 
-        let client_task = Self::run_client_task(self.log_topic, &self.subscribers, &self.client, &topics, &mut inbox);
+        let client_task = Self::run_client_task(&self.subscribers, &self.client, &topics, &mut inbox);
         tracing::info!("[MqttModule] Client task created");
         join(client_task, mqtt_stack_task).await.1
     }
 }
 
-impl<Rng: CryptoRngCore, const H: usize, const N: usize, const NET: usize, const TCP: usize, const TLS: usize> MqttModule<Rng, H, N, NET, TCP, TLS> {
-    const __ASSERT: () = assert!(H <= NET);
-
+impl<Rng: CryptoRngCore, const N: usize, const NET: usize, const TCP: usize, const TLS: usize> MqttModule<Rng, N, NET, TCP, TLS> {
     pub fn new(
         client_id: &'static str,
-        log_topic: &'static str,
         network_stack: Stack<'static>,
         subscribers: [(&'static str, &'static dyn ErasedHandle); N],
         mqtt_state: &'static mut State<CriticalSectionRawMutex, NET, NET>,
@@ -176,7 +196,6 @@ impl<Rng: CryptoRngCore, const H: usize, const N: usize, const NET: usize, const
         let transport = TlsNalTransport::new(network, IpBroker::new(Ipv4Addr::new(217, 195, 48, 206), 1883), tls_state, tls_config, provider);
 
         Self {
-            log_topic,
             subscribers,
             mqtt_stack,
             client,
@@ -201,11 +220,10 @@ impl<Rng: CryptoRngCore, const H: usize, const N: usize, const NET: usize, const
     /// Runs the main mqtt client task loop: waits for connection, races background workers
     /// against disconnect detection, then drains the inbox until reconnected.
     async fn run_client_task(
-        log_topic: &'static str,
         subscribers: &[(&'static str, &'static dyn ErasedHandle); N],
         client: &MqttClient<'static, CriticalSectionRawMutex>,
         topics: &[SubscribeTopic<'static>; N],
-        inbox: &mut ivy_types::actor::Inbox<<MqttHandle<H> as ivy_types::actor::ActorHandle>::Cmd>,
+        inbox: &mut ivy_types::actor::Inbox<<RawMqttHandle as ivy_types::actor::ActorHandle>::Cmd>,
     ) -> ! {
         loop {
             // don't spin the workers up until we're actually connected
@@ -214,11 +232,10 @@ impl<Rng: CryptoRngCore, const H: usize, const N: usize, const NET: usize, const
             // Neither of those tasks, should ever return. Only point of failure is mqtt_client itself, if connection lost all of tasks would be cancelled anyways.
             let inbox_task = Self::handle_inbox_task(client, inbox);
             let sub_task = Self::handle_subscriptions(subscribers, client, topics);
-            let log_task = Self::handle_log_sending(client, log_topic);
             let disconnect_watch = Self::wait_for_disconnect(client);
 
             // Neither of those futures, besides disconnect_watch ever returns.
-            select4(inbox_task, sub_task, log_task, disconnect_watch).await;
+            select3(inbox_task, sub_task, disconnect_watch).await;
 
             tracing::warn!("[MqttModule] connection lost, draining inbox until reconnect");
             // Drain inbox till disconnected
@@ -234,26 +251,27 @@ impl<Rng: CryptoRngCore, const H: usize, const N: usize, const NET: usize, const
         }
     }
     /// Drains inbox, so that it won't overflow with uncompleted publish requests.
-    async fn drain_inbox_task(inbox: &mut ivy_types::actor::Inbox<<MqttHandle<H> as ivy_types::actor::ActorHandle>::Cmd>) -> ! {
+    async fn drain_inbox_task(inbox: &mut ivy_types::actor::Inbox<<RawMqttHandle as ivy_types::actor::ActorHandle>::Cmd>) -> ! {
         loop {
             match inbox.next().await {
-                MqttHandleCommand::Publish(c, _, _, _) => {
+                MqttHandleCommand::Publish(c, _, _) => {
                     c.ack_err(MqttError::Disconnected).await;
                 }
             }
         }
     }
+
     /// Handles inbox commands
-    async fn handle_inbox_task(client: &MqttClient<'static, CriticalSectionRawMutex>, inbox: &mut ivy_types::actor::Inbox<<MqttHandle<H> as ivy_types::actor::ActorHandle>::Cmd>) {
+    /// NOTE: logging here is not permited, as it would cause loop issues for logs
+    async fn handle_inbox_task(client: &MqttClient<'static, CriticalSectionRawMutex>, inbox: &mut ivy_types::actor::Inbox<<RawMqttHandle as ivy_types::actor::ActorHandle>::Cmd>) {
         loop {
             match inbox.next().await {
-                MqttHandleCommand::Publish(c, topic, payload, len) => {
-                    let publish_pkt = Publish::builder().topic_name(&topic).payload(&payload[..len]).qos(mqttrust::QoS::AtMostOnce).build();
+                MqttHandleCommand::Publish(c, topic, payload) => {
+                    let publish_pkt = Publish::builder().topic_name(&topic).payload(payload).qos(mqttrust::QoS::AtMostOnce).build();
 
                     match client.publish(publish_pkt).await {
                         Ok(_) => c.ack().await,
                         Err(e) => {
-                            tracing::error!("[MqttModule] Failed to publish message to {}: {:?}", topic, e);
                             c.ack_err(MqttError::MqttClient(e)).await;
                         }
                     }
@@ -300,20 +318,6 @@ impl<Rng: CryptoRngCore, const H: usize, const N: usize, const NET: usize, const
             }
         }
     }
-    /// Handles log sending
-    async fn handle_log_sending(client: &MqttClient<'static, CriticalSectionRawMutex>, log_topic: &'static str) -> ! {
-        let mut work_buf = [0u8; 1024];
-        loop {
-            let log = LOG_CHANNEL.receive().await;
-            let Ok(serialized) = serde_json_core::to_slice(&log, &mut work_buf) else {
-                continue;
-            };
-            client
-                .publish(Publish::builder().topic_name(log_topic).payload(&work_buf[..serialized]).qos(mqttrust::QoS::AtMostOnce).build())
-                .await
-                .ok();
-        }
-    }
 }
 /// Macro to pre-declares subscriptions, that will be managed by mqtt durning app lifetime.
 #[macro_export]
@@ -356,4 +360,34 @@ macro_rules! declare_subcriptions {
 macro_rules! count {
     () => { 0 };
     ($_head:ident $($tail:ident)*) => { 1 + count!($($tail)*) };
+}
+
+const DEFAULT_LOG_OVERHEAD: usize = 100;
+
+pub struct MqttLogger {
+    log_topic: &'static str,
+    handle: RawMqttHandle,
+}
+
+impl MqttLogger {
+    pub fn new(log_topic: &'static str, handle: RawMqttHandle) -> Self {
+        Self { log_topic, handle }
+    }
+}
+
+impl LogConsumer for MqttLogger {
+    async fn consume_logs(&mut self, log_sink: LogSink) -> ! {
+        let mut work_buf = [0u8; LOG_SIZE + TAG_SIZE + DEFAULT_LOG_OVERHEAD];
+        loop {
+            let log = log_sink.receive().await;
+            let Ok(serialized) = serde_json_core::to_slice(&log, &mut work_buf) else {
+                continue;
+            };
+            /* SAFETY: `work_buf` isn't touched again until this await resolves,
+            satisfying `publish`'s read-before-reply requirement. */
+            unsafe {
+                self.handle.publish(self.log_topic, &work_buf[..serialized]).await.ok();
+            }
+        }
+    }
 }

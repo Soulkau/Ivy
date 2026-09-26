@@ -2,7 +2,7 @@ use heck::ToPascalCase;
 use proc_macro::TokenStream;
 use quote::{format_ident, quote};
 use syn::{
-    Expr, FnArg, Ident, ItemTrait, Pat, Result as SResult, ReturnType, Token, TraitItem, Type,
+    FnArg, Ident, ItemTrait, Pat, Result as SResult, ReturnType, TraitItem, Type,
     parse::{Parse, ParseStream},
     parse_macro_input,
 };

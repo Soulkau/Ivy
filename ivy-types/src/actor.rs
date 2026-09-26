@@ -142,4 +142,8 @@ pub mod rt {
         bomb.defuse();
         value
     }
+
+    pub unsafe fn launder_slice(value: &[u8]) -> &'static [u8] {
+        unsafe { core::mem::transmute::<&[u8], &'static [u8]>(value) }
+    }
 }
