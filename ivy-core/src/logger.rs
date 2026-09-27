@@ -1,9 +1,11 @@
+use core::cell::RefCell;
 use core::fmt::Write;
 use core::sync::atomic::{AtomicU32, Ordering};
 
-use embassy_sync::blocking_mutex::raw::{CriticalSectionRawMutex, RawMutex};
-use embassy_sync::channel::{Channel, Receiver, Sender};
-use heapless::String;
+use embassy_sync::blocking_mutex::Mutex;
+use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
+use embassy_sync::signal::Signal;
+use heapless::{Deque, String};
 use static_cell::StaticCell;
 use talky::logs::{DeviceLog, LogLevel};
 use tracing::{
@@ -12,21 +14,66 @@ use tracing::{
     span,
 };
 
-pub const LOG_SIZE: usize = 512;
+pub const LOG_SIZE: usize = 256;
 pub const TAG_SIZE: usize = 16;
 pub const LOG_QUEUE_SIZE: usize = 16;
 
 pub type Log = DeviceLog<LOG_SIZE, TAG_SIZE>;
+pub type SizedLogQueue = LogQueue<LOG_QUEUE_SIZE>;
 
-pub type LogSink = Receiver<'static, CriticalSectionRawMutex, Log, LOG_QUEUE_SIZE>;
+// the consumer just needs a 'static ref into the queue to pop() from
+pub type LogSink = &'static SizedLogQueue;
 
 pub trait LogEmitter: Sync + Send {
-    fn send(&self, device_log: Log);
+    fn send(&self, log: Log);
 }
 
 #[allow(async_fn_in_trait)]
 pub trait LogConsumer {
     async fn consume_logs(&mut self, sink: LogSink) -> !;
+}
+
+pub struct LogQueue<const N: usize> {
+    buf: Mutex<CriticalSectionRawMutex, RefCell<Deque<Log, N>>>,
+    notify: Signal<CriticalSectionRawMutex, ()>,
+}
+
+impl<const N: usize> LogQueue<N> {
+    pub const fn new() -> Self {
+        Self {
+            buf: Mutex::new(RefCell::new(Deque::new())),
+            notify: Signal::new(),
+        }
+    }
+
+    pub fn push(&self, item: Log) {
+        self.buf.lock(|cell| {
+            let mut buf = cell.borrow_mut();
+            if buf.is_full() {
+                buf.pop_front();
+            }
+            buf.push_back(item).ok();
+        });
+        self.notify.signal(());
+    }
+
+    pub async fn pop(&self) -> Log {
+        loop {
+            let item = self.buf.lock(|cell| cell.borrow_mut().pop_front());
+            if let Some(item) = item {
+                return item;
+            }
+            self.notify.wait().await;
+        }
+    }
+}
+
+// emitter impl is on the *reference*, since Logger owns E by value
+// and we need Logger to hold a handle into the static queue, not the queue itself
+impl<const N: usize> LogEmitter for &'static LogQueue<N> {
+    fn send(&self, log: Log) {
+        LogQueue::push(self, log);
+    }
 }
 
 pub struct Logger<E: LogEmitter> {
@@ -82,8 +129,6 @@ impl BufVisitor {
         }
     }
 
-    // core::fmt::Write returns Err on overflow for heapless::String,
-    // we just eat the error and keep whatever fit.
     fn write(&mut self, args: core::fmt::Arguments) {
         let _ = self.buf.write_fmt(args);
     }
@@ -123,21 +168,15 @@ impl Visit for BufVisitor {
     }
 }
 
-impl<'a, M: RawMutex + Sync, const Q: usize> LogEmitter for Sender<'a, M, Log, Q> {
-    fn send(&self, device_log: Log) {
-        self.try_send(device_log).ok();
-    }
-}
-
-fn register_dispatcher<E: LogEmitter + 'static>(level: Level, sink: E) {
-    tracing::dispatcher::set_global_default(Dispatch::new(Logger::new(level, sink))).unwrap();
+fn register_dispatcher(level: Level, queue: LogSink) {
+    tracing::dispatcher::set_global_default(Dispatch::new(Logger::new(level, queue))).unwrap();
 }
 
 pub fn init_subscriber(level: Level) -> LogSink {
-    static CHANNEL: StaticCell<Channel<CriticalSectionRawMutex, Log, LOG_QUEUE_SIZE>> = StaticCell::new();
-    let channel = &*CHANNEL.init_with(|| Channel::new());
-    register_dispatcher(level, channel.sender());
-    channel.receiver()
+    static QUEUE: StaticCell<SizedLogQueue> = StaticCell::new();
+    let queue: LogSink = QUEUE.init_with(LogQueue::new);
+    register_dispatcher(level, queue);
+    queue
 }
 
 #[macro_export]
@@ -148,6 +187,7 @@ macro_rules! init_logger {
             use $crate::logger::LogConsumer;
             consumer.consume_logs(sink).await
         }
-        $spawner.spawn(___logger_task($consumer, $sink).unwrap());
+        //TODO: error handling, do not panic
+        $spawner.spawn(___logger_task($consumer, $sink).expect("Failed to run log task"));
     }};
 }

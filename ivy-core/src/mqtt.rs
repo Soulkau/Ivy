@@ -2,7 +2,7 @@ use core::net::Ipv4Addr;
 
 use embassy_futures::{
     join::join,
-    select::{select, select3, select4},
+    select::{select, select3},
 };
 use embassy_net::{
     Stack,
@@ -379,7 +379,7 @@ impl LogConsumer for MqttLogger {
     async fn consume_logs(&mut self, log_sink: LogSink) -> ! {
         let mut work_buf = [0u8; LOG_SIZE + TAG_SIZE + DEFAULT_LOG_OVERHEAD];
         loop {
-            let log = log_sink.receive().await;
+            let log = log_sink.pop().await;
             let Ok(serialized) = serde_json_core::to_slice(&log, &mut work_buf) else {
                 continue;
             };
