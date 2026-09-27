@@ -121,15 +121,23 @@ pub mod rt {
 
     impl Drop for DropBomb {
         fn drop(&mut self) {
-            panic!("Dropped before the request completed. You  cannot cancel an ongoing request")
+            panic!("Dropped before the request completed. You cannot cancel an ongoing request")
         }
     }
 
+    /// Sends `Cmd` to an actor and awaits its reply.
+    ///
+    /// # Panics
+    /// This future is not cancel-safe. If dropped before completion (e.g. via
+    /// `select!` or a timeout), it panics. The reply channel is
+    /// unsafely extended to `'static` so the actor can hold a reference to it,
+    /// that's only sound if this future is guaranteed to run to completion which is enforced by `DropBomb`
     pub async fn request<Cmd, T: 'static>(actor_sender: &DynamicSender<'static, Cmd>, build: impl FnOnce(ReplyConsumer<T>) -> Cmd) -> T {
         let channel: Channel<NoopRawMutex, T, 1> = Channel::new();
         let sender: DynamicSender<'_, T> = channel.sender().into();
-        let bomb = DropBomb::new();
+        let bomb = DropBomb::new(); // Guarantee that channel will live until the end of function
 
+        // # Safety
         // We guarantee that channel lives until we've been notified on it, at which
         // point its out of reach for the replier.
         let reply_to = unsafe { core::mem::transmute::<&embassy_sync::channel::DynamicSender<'_, T>, &'static embassy_sync::channel::DynamicSender<'_, T>>(&sender) };
@@ -142,7 +150,7 @@ pub mod rt {
         bomb.defuse();
         value
     }
-
+    /// Just a simple helper for casting slice lifetimes.
     pub unsafe fn launder_slice(value: &[u8]) -> &'static [u8] {
         unsafe { core::mem::transmute::<&[u8], &'static [u8]>(value) }
     }
