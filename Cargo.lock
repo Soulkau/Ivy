@@ -1033,7 +1033,7 @@ checksum = "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682"
 
 [[package]]
 name = "ivy"
-version = "0.1.0"
+version = "0.2.4"
 dependencies = [
  "ivy-core",
  "ivy-macros",
@@ -1815,8 +1815,8 @@ dependencies = [
 
 [[package]]
 name = "talky"
-version = "0.1.0"
-source = "git+https://github.com/Soulkau/Talky.git?tag=v0.1#f73f8effc2af46d2682e97c7f4d3f3f91423ee21"
+version = "0.1.1"
+source = "git+https://github.com/Soulkau/Talky?rev=dc0a09c#dc0a09ca6e58b367ca0db5a7ec960155b6a11589"
 dependencies = [
  "talky-core",
  "talky-types",
@@ -1825,7 +1825,7 @@ dependencies = [
 [[package]]
 name = "talky-core"
 version = "0.1.0"
-source = "git+https://github.com/Soulkau/Talky.git?tag=v0.1#f73f8effc2af46d2682e97c7f4d3f3f91423ee21"
+source = "git+https://github.com/Soulkau/Talky?rev=dc0a09c#dc0a09ca6e58b367ca0db5a7ec960155b6a11589"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1855,7 +1855,7 @@ dependencies = [
 [[package]]
 name = "talky-types"
 version = "0.1.0"
-source = "git+https://github.com/Soulkau/Talky.git?tag=v0.1#f73f8effc2af46d2682e97c7f4d3f3f91423ee21"
+source = "git+https://github.com/Soulkau/Talky?rev=dc0a09c#dc0a09ca6e58b367ca0db5a7ec960155b6a11589"
 dependencies = [
  "heapless 0.9.3",
  "serde",

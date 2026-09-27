@@ -1,6 +1,6 @@
 [package]
 name = "ivy"
-version = "0.2.3"
+version = "0.2.4"
 edition = "2024"
 
 [workspace]
@@ -10,7 +10,7 @@ exclude = [
     "templates"
 ]
 [workspace.dependencies]
-talky = { git = "https://github.com/Soulkau/Talky.git", tag="v0.1" }
+talky = { git = "https://github.com/Soulkau/Talky", rev = "dc0a09c" }
 
 # Main
 static_cell = "2.1.1"
