@@ -132,6 +132,20 @@ impl<const B: usize> SizedMqttHandle<B> {
     }
 }
 
+pub struct MqttCredentials {
+    pub client_id: String<64>,
+    pub username: String<64>,
+    pub password: String<64>,
+}
+
+pub struct MqttResources<Rng: CryptoRngCore + 'static, const NET: usize = 4096, const TCP: usize = 4096, const TLS: usize = 16640> {
+    pub network_stack: Stack<'static>,
+    pub mqtt_state: &'static mut State<CriticalSectionRawMutex, NET, NET>,
+    pub tls_state: &'static mut MqttTlsState<TLS>,
+    pub tcp_client: &'static mut MqttTcpClient<TCP>,
+    pub tls_config: &'static TlsConfig<'static>,
+    pub rng: Rng,
+}
 pub struct MqttModule<Rng: CryptoRngCore + 'static, const S: usize, const NET: usize = 4096, const TCP: usize = 4096, const TLS: usize = 16640> {
     subscribers: [(&'static str, &'static dyn ErasedHandle); S],
     network_stack: Stack<'static>,
@@ -157,23 +171,14 @@ impl<Rng: CryptoRngCore, const S: usize, const NET: usize, const TCP: usize, con
     }
 }
 
-impl<Rng: CryptoRngCore, const N: usize, const NET: usize, const TCP: usize, const TLS: usize> MqttModule<Rng, N, NET, TCP, TLS> {
-    pub fn new(
-        client_id: &'static str,
-        network_stack: Stack<'static>,
-        subscribers: [(&'static str, &'static dyn ErasedHandle); N],
-        mqtt_state: &'static mut State<CriticalSectionRawMutex, NET, NET>,
-        tls_state: &'static mut MqttTlsState<TLS>,
-        network: &'static mut MqttTcpClient<TCP>,
-        tls_config: &'static TlsConfig,
-        rng: Rng,
-    ) -> Self {
+impl<Rng: CryptoRngCore, const S: usize, const NET: usize, const TCP: usize, const TLS: usize> MqttModule<Rng, S, NET, TCP, TLS> {
+    pub fn new(res: MqttResources<Rng, NET, TCP, TLS>, creds: MqttCredentials, subscribers: [(&'static str, &'static dyn ErasedHandle); S]) -> Self {
         tracing::info!("[MqttModule] Creating MQTT module");
-
+        static CREDS: StaticCell<MqttCredentials> = StaticCell::new();
+        let creds = CREDS.init(creds);
         let configuration = Config::builder()
-            .client_id(client_id.try_into().expect("Failed to create client id"))
+            .client_id(creds.client_id.clone())
             .connect_timeout(Duration::from_secs(20))
-            // Default MQTT backoff algo, but capped at 7 attempts (~1 min total sleep) before failing
             .backoff_algo(|attempt| {
                 let max_attempts = 7;
                 if attempt >= max_attempts {
@@ -184,23 +189,20 @@ impl<Rng: CryptoRngCore, const N: usize, const NET: usize, const TCP: usize, con
 
                 Some(Duration::from_millis(backoff.into()))
             })
-            .password(option_env!("NATS_PASS").expect("Failed to get NATS_PASS").as_ref())
-            .username(option_env!("NATS_USER").expect("Failed to get NATS_USER").as_ref())
+            .password(creds.password.as_bytes())
+            .username(creds.username.as_str())
             .build();
-        tracing::info!("[MqttModule] MQTT configuration built");
 
-        let (mqtt_stack, client) = mqttrust::new(mqtt_state, configuration);
-
-        let provider = UnsecureProvider::new::<Aes128GcmSha256>(rng);
-
-        let transport = TlsNalTransport::new(network, IpBroker::new(Ipv4Addr::new(217, 195, 48, 206), 1883), tls_state, tls_config, provider);
+        let (mqtt_stack, client) = mqttrust::new(res.mqtt_state, configuration);
+        let provider = UnsecureProvider::new::<Aes128GcmSha256>(res.rng);
+        let transport = TlsNalTransport::new(res.tcp_client, IpBroker::new(Ipv4Addr::new(217, 195, 48, 206), 1883), res.tls_state, res.tls_config, provider);
 
         Self {
             subscribers,
             mqtt_stack,
             client,
             transport,
-            network_stack,
+            network_stack: res.network_stack,
         }
     }
 
@@ -220,9 +222,9 @@ impl<Rng: CryptoRngCore, const N: usize, const NET: usize, const TCP: usize, con
     /// Runs the main mqtt client task loop: waits for connection, races background workers
     /// against disconnect detection, then drains the inbox until reconnected.
     async fn run_client_task(
-        subscribers: &[(&'static str, &'static dyn ErasedHandle); N],
+        subscribers: &[(&'static str, &'static dyn ErasedHandle); S],
         client: &MqttClient<'static, CriticalSectionRawMutex>,
-        topics: &[SubscribeTopic<'static>; N],
+        topics: &[SubscribeTopic<'static>; S],
         inbox: &mut ivy_types::actor::Inbox<<RawMqttHandle as ivy_types::actor::ActorHandle>::Cmd>,
     ) -> ! {
         loop {
@@ -280,14 +282,14 @@ impl<Rng: CryptoRngCore, const N: usize, const NET: usize, const TCP: usize, con
         }
     }
     /// Manages subscriptions
-    async fn handle_subscriptions(subscribers: &[(&'static str, &'static dyn ErasedHandle); N], client: &MqttClient<'static, CriticalSectionRawMutex>, topics: &[SubscribeTopic<'static>; N]) -> ! {
+    async fn handle_subscriptions(subscribers: &[(&'static str, &'static dyn ErasedHandle); S], client: &MqttClient<'static, CriticalSectionRawMutex>, topics: &[SubscribeTopic<'static>; S]) -> ! {
         loop {
             tracing::info!("[MqttModule] Subscribing to topics");
             let mut back_off_ms = 2000;
             let mut subscription = loop {
                 let sub_pkt = Subscribe::builder().topics(topics).build();
 
-                match client.subscribe::<N>(sub_pkt).await {
+                match client.subscribe::<S>(sub_pkt).await {
                     Ok(sub) => {
                         tracing::info!("[MqttModule] Successfully subscribed to topics");
                         break sub;
