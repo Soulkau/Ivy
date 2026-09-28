@@ -1,5 +1,8 @@
 use core::net::Ipv4Addr;
 
+use alloc::boxed::Box;
+use core::alloc::Allocator;
+
 use embassy_futures::{
     join::join,
     select::{select, select3},
@@ -11,6 +14,7 @@ use embassy_net::{
 use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, signal::Signal};
 use embassy_time::{Duration, Timer};
 use embedded_tls::{Aes128GcmSha256, CryptoRngCore, TlsConfig, UnsecureProvider};
+use heapless::String;
 use ivy_macros::actor_handle;
 use ivy_types::actor::{Actor, rt::launder_slice};
 use mqttrust::{
@@ -20,6 +24,7 @@ use mqttrust::{
 use serde::{Serialize, de::DeserializeOwned};
 
 pub use mqttrust::State as MqttState;
+use static_cell::StaticCell;
 
 use crate::logger::{LOG_SIZE, LogConsumer, LogSink, TAG_SIZE};
 
@@ -146,6 +151,25 @@ pub struct MqttResources<Rng: CryptoRngCore + 'static, const NET: usize = 4096, 
     pub tls_config: &'static TlsConfig<'static>,
     pub rng: Rng,
 }
+
+// Accept &A instead of A by value
+fn leak_in<T, A: Allocator>(value: T, alloc: &'static A) -> &'static mut T {
+    Box::leak(Box::new_in(value, alloc))
+}
+
+impl<Rng: CryptoRngCore + 'static, const NET: usize, const TCP: usize, const TLS: usize> MqttResources<Rng, NET, TCP, TLS> {
+    pub fn leak_in<A: Allocator>(stack: Stack<'static>, rng: Rng, alloc: &'static A) -> Self {
+        Self {
+            network_stack: stack,
+            mqtt_state: leak_in(MqttState::new(), alloc),
+            tls_state: leak_in(MqttTlsState::new(), alloc),
+            tcp_client: leak_in(MqttTcpClient::new(stack, leak_in(MqttTcpClientState::new(), alloc)), alloc),
+            tls_config: leak_in(TlsConfig::default().enable_rsa_signatures(), alloc),
+            rng,
+        }
+    }
+}
+
 pub struct MqttModule<Rng: CryptoRngCore + 'static, const S: usize, const NET: usize = 4096, const TCP: usize = 4096, const TLS: usize = 16640> {
     subscribers: [(&'static str, &'static dyn ErasedHandle); S],
     network_stack: Stack<'static>,
