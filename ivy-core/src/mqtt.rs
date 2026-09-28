@@ -181,23 +181,23 @@ impl<Rng: CryptoRngCore, const S: usize, const NET: usize, const TCP: usize, con
     type Handle = RawMqttHandle;
 
     async fn act(&mut self, mut inbox: ivy_types::actor::Inbox<<Self::Handle as ivy_types::actor::ActorHandle>::Cmd>) -> ! {
-        tracing::info!("[MqttModule] Starting acting");
+        tracing::debug!(tag = "mqtt", "started acting");
         let mqtt_stack_task = Self::run_stack_task(&mut self.mqtt_stack, &mut self.transport, self.network_stack.clone());
-        tracing::info!("[MqttModule] MQTT task is created");
+        tracing::debug!(tag = "mqtt", "mqtt task was created");
         let topics: [SubscribeTopic<'static>; S] = core::array::from_fn(|i| {
             let (name, _handle) = self.subscribers[i];
             name.into()
         });
 
         let client_task = Self::run_client_task(&self.subscribers, &self.client, &topics, &mut inbox);
-        tracing::info!("[MqttModule] Client task created");
+        tracing::debug!(tag = "mqtt", "client task was created");
         join(client_task, mqtt_stack_task).await.1
     }
 }
 
 impl<Rng: CryptoRngCore, const S: usize, const NET: usize, const TCP: usize, const TLS: usize> MqttModule<Rng, S, NET, TCP, TLS> {
     pub fn new(res: MqttResources<Rng, NET, TCP, TLS>, creds: MqttCredentials, subscribers: [(&'static str, &'static dyn ErasedHandle); S]) -> Self {
-        tracing::info!("[MqttModule] Creating MQTT module");
+        tracing::info!(tag = "mqtt", "creating mqtt module");
         static CREDS: StaticCell<MqttCredentials> = StaticCell::new();
         let creds = CREDS.init(creds);
         let configuration = Config::builder()
@@ -221,6 +221,7 @@ impl<Rng: CryptoRngCore, const S: usize, const NET: usize, const TCP: usize, con
         let provider = UnsecureProvider::new::<Aes128GcmSha256>(res.rng);
         let transport = TlsNalTransport::new(res.tcp_client, IpBroker::new(Ipv4Addr::new(217, 195, 48, 206), 1883), res.tls_state, res.tls_config, provider);
 
+        tracing::info!(tag = "mqtt", "created mqtt module");
         Self {
             subscribers,
             mqtt_stack,
@@ -239,7 +240,7 @@ impl<Rng: CryptoRngCore, const S: usize, const NET: usize, const TCP: usize, con
             // All following is done internally in run of mqtt_stack, but just to make sure
             mqtt_stack.disconnect(transport).await.ok();
             mqtt_stack.reset().await;
-            tracing::info!("[MqttModule] Connection lost, reconnecting...");
+            tracing::warn!(tag = "mqtt", "connection lost, reconnecting...");
         }
     }
 
@@ -254,7 +255,7 @@ impl<Rng: CryptoRngCore, const S: usize, const NET: usize, const TCP: usize, con
         loop {
             // don't spin the workers up until we're actually connected
             client.wait_connected().await;
-            tracing::info!("[MqttModule] Connected, starting worker tasks");
+            tracing::debug!(tag = "mqtt", "connected, starting worker tasks");
             // Neither of those tasks, should ever return. Only point of failure is mqtt_client itself, if connection lost all of tasks would be cancelled anyways.
             let inbox_task = Self::handle_inbox_task(client, inbox);
             let sub_task = Self::handle_subscriptions(subscribers, client, topics);
@@ -263,7 +264,7 @@ impl<Rng: CryptoRngCore, const S: usize, const NET: usize, const TCP: usize, con
             // Neither of those futures, besides disconnect_watch ever returns.
             select3(inbox_task, sub_task, disconnect_watch).await;
 
-            tracing::warn!("[MqttModule] connection lost, draining inbox until reconnect");
+            tracing::warn!(tag = "mqtt", "connection lost, draining inbox until reconnect");
             // Drain inbox till disconnected
             select(Self::drain_inbox_task(inbox), client.wait_connected()).await;
         }
@@ -308,18 +309,18 @@ impl<Rng: CryptoRngCore, const S: usize, const NET: usize, const TCP: usize, con
     /// Manages subscriptions
     async fn handle_subscriptions(subscribers: &[(&'static str, &'static dyn ErasedHandle); S], client: &MqttClient<'static, CriticalSectionRawMutex>, topics: &[SubscribeTopic<'static>; S]) -> ! {
         loop {
-            tracing::info!("[MqttModule] Subscribing to topics");
+            tracing::debug!(tag = "mqtt", "subscribing to topics");
             let mut back_off_ms = 2000;
             let mut subscription = loop {
                 let sub_pkt = Subscribe::builder().topics(topics).build();
 
                 match client.subscribe::<S>(sub_pkt).await {
                     Ok(sub) => {
-                        tracing::info!("[MqttModule] Successfully subscribed to topics");
+                        tracing::debug!(tag = "mqtt", "successfully subscribed to topics");
                         break sub;
                     }
                     Err(e) => {
-                        tracing::error!("[MqttModule] Subscribe failed: {:?}. Retrying in {}ms...", e, back_off_ms);
+                        tracing::error!(tag = "mqtt", "subscribe failed: {:?}. retrying in {}ms...", e, back_off_ms);
                         Timer::after(Duration::from_millis(back_off_ms)).await;
                         back_off_ms = (back_off_ms * 3 / 2).min(20000);
                     }
@@ -330,16 +331,16 @@ impl<Rng: CryptoRngCore, const S: usize, const NET: usize, const TCP: usize, con
                     Some(msg) => {
                         let handle = subscribers.iter().find(|(name, _)| *name == msg.topic_name());
                         let Some(handle) = handle else {
-                            tracing::warn!("[MqttModule] No handle found for topic {}", msg.topic_name());
+                            tracing::warn!(tag = "mqtt", "no handle found for topic {}", msg.topic_name());
                             continue;
                         };
                         let Err(e) = handle.1.dispatch(&msg.payload()) else {
-                            tracing::info!("[MqttModule] Dispatched message for topic {}", msg.topic_name());
+                            tracing::debug!(tag = "mqtt", "dispatched message for topic {}", msg.topic_name());
                             continue;
                         };
-                        tracing::error!("[MqttModule] Failed to dispatch error: {}", e);
+                        tracing::error!(tag = "mqtt", "failed to dispatch error: {}", e);
                     }
-                    None => tracing::error!("[MqttModule] Received none"),
+                    None => tracing::error!(tag = "mqtt", "received none"),
                 }
             }
         }
